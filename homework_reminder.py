@@ -68,7 +68,8 @@ class ChaoXingClient:
     API_HOMEWORK_PAGE = "https://mooc1-api.chaoxing.com/work/stu-work"
     API_EXAM_PAGE = "https://mooc1-api.chaoxing.com/exam-ans/exam/phone/examcode"
     API_EXAM_LIST = "https://mooc1.chaoxing.com/exam-ans/exam/test/examcode/examlist?edition=1&nohead=0&fid="
-    API_VISIT_COURSE = "https://mooc1.chaoxing.com/visit/stucoursemiddle?ismooc2=1"
+    API_COURSE_VISIT = "https://mooc1.chaoxing.com/visit/stucoursemiddle"
+    API_WORK_LIST = "https://mooc1.chaoxing.com/mooc2/work/list"
 
     ACTIVE_TYPE_MAP = {
         0: "签到", 2: "签到", 4: "抢答", 5: "主题讨论", 6: "投票",
@@ -258,7 +259,8 @@ class ChaoXingClient:
             if raw:
                 try:
                     from urllib.parse import urlparse, parse_qs
-                    full_raw = raw if raw.startswith("http") else f"https://mooc1-api.chaoxing.com{raw}"
+                    full_raw = raw if raw.startswith("http") else f"https://mooc1.chaoxing.com{raw}"
+                    full_raw = full_raw.replace("mooc1-api.chaoxing.com", "mooc1.chaoxing.com")
                     parsed = urlparse(full_raw)
                     qs = parse_qs(parsed.query)
                     exam_id = qs.get("taskrefId", [""])[0]
@@ -345,31 +347,147 @@ class ChaoXingClient:
             pass
         return None
 
+    @staticmethod
+    def _fix_url(url):
+        if not url:
+            return ""
+        url = url.replace("mooc1-api.chaoxing.com", "mooc1.chaoxing.com")
+        if not url.startswith("http"):
+            url = f"https://mooc1.chaoxing.com{url}"
+        return url
+
+    def _build_homework_url(self, course_id, clazz_id):
+        return f"{self.API_COURSE_VISIT}?ismooc2=1&courseid={course_id}&clazzid={clazz_id}&pageHeader=8"
+
+    def _build_exam_url(self, course_id, class_id, exam_id):
+        return f"https://mooc1.chaoxing.com/exam-ans/exam/test/examcode/examnotes?courseId={course_id}&classId={class_id}&examId={exam_id}"
+
+    def _build_activity_url(self, course_id, clazz_id):
+        return f"{self.API_COURSE_VISIT}?ismooc2=1&courseid={course_id}&clazzid={clazz_id}"
+
+    def _get_work_enc_and_url(self, course):
+        course_id = course["courseId"]
+        clazz_id = course["clazzId"]
+        cpi = course.get("cpi", "")
+        course_name = course.get("courseName", "")
+        try:
+            resp = self.session.get(
+                self.API_COURSE_VISIT,
+                params={"ismooc2": "1", "courseid": course_id, "clazzid": clazz_id, "cpi": cpi},
+            )
+            soup = BeautifulSoup(resp.text, "html.parser")
+            work_enc_input = soup.find("input", id="workEnc")
+            if not work_enc_input or not work_enc_input.get("value"):
+                print(f"[超星] 课程 {course_name}: 未找到 workEnc")
+                return None
+            work_enc = work_enc_input["value"]
+            work_resp = self.session.get(
+                self.API_WORK_LIST,
+                params={
+                    "courseId": course_id,
+                    "classId": clazz_id,
+                    "cpi": cpi,
+                    "ut": "s",
+                    "enc": work_enc,
+                },
+                headers={
+                    "Host": "mooc1.chaoxing.com",
+                    "Referer": f"https://mooc1.chaoxing.com/visit/stucoursemiddle?ismooc2=1&courseid={course_id}&clazzid={clazz_id}",
+                },
+            )
+            work_soup = BeautifulSoup(work_resp.text, "html.parser")
+            work_items = []
+            for li in work_soup.find_all("li"):
+                data_url = li.get("data", "")
+                title_el = li.find("p")
+                title = title_el.get_text(strip=True) if title_el else ""
+                status_el = title_el.find_next("p") if title_el else None
+                status = status_el.get_text(strip=True) if status_el else ""
+                if data_url and title:
+                    full_url = data_url if data_url.startswith("http") else f"https://mooc1.chaoxing.com{data_url}"
+                    full_url = full_url.replace("mooc1-api.chaoxing.com", "mooc1.chaoxing.com")
+                    work_id = ""
+                    try:
+                        from urllib.parse import urlparse, parse_qs
+                        parsed = urlparse(data_url)
+                        qs = parse_qs(parsed.query)
+                        work_id = qs.get("workId", [""])[0]
+                    except Exception:
+                        pass
+                    work_items.append({
+                        "title": title,
+                        "status": status,
+                        "url": full_url,
+                        "work_id": work_id,
+                        "course_id": course_id,
+                    })
+            print(f"[超星] 课程 {course_name}: 获取到 {len(work_items)} 个作业URL")
+            return work_items if work_items else None
+        except Exception as e:
+            print(f"[超星] 获取课程 {course_name} 作业列表失败: {e}")
+            return None
+
     def get_homework(self):
         homework_list = []
 
         if not self.courses:
             self.get_courses()
 
+        course_map = {c["courseId"]: c for c in self.courses if c.get("courseId")}
+
         try:
             resp = self.session.get(self.API_HOMEWORK_PAGE)
             hw_items = self._extract_homework_from_html(resp.text)
-            cpi_map = {c["courseId"]: c["cpi"] for c in self.courses if c.get("courseId") and c.get("cpi")}
-            for item in hw_items:
-                hw_url = item.get("raw", "")
-                if hw_url and not hw_url.startswith("http"):
-                    hw_url = f"https://mooc1-api.chaoxing.com{hw_url}"
-                homework_list.append(HomeworkItem(
-                    title=item["title"],
-                    course=item["course"],
-                    deadline=item["deadline"],
-                    platform=self.PLATFORM,
-                    submitted=not item["uncommitted"],
-                    url=hw_url,
-                ))
-            print(f"[超星] 从作业页面获取到 {len(hw_items)} 项作业")
         except Exception as e:
             print(f"[超星] 获取作业页面失败: {e}")
+            hw_items = []
+
+        needed_course_ids = set()
+        for item in hw_items:
+            cid = item.get("course_id", "")
+            wid = item.get("work_id", "")
+            if cid and wid:
+                needed_course_ids.add(cid)
+
+        work_url_map = {}
+        for cid in needed_course_ids:
+            course = course_map.get(cid)
+            if not course:
+                continue
+            work_items = self._get_work_enc_and_url(course)
+            if work_items:
+                for w in work_items:
+                    key = f"{w['course_id']}_{w['work_id']}"
+                    if key not in work_url_map:
+                        work_url_map[key] = w["url"]
+
+        def find_work_url(item):
+            course_id = item.get("course_id", "")
+            work_id = item.get("work_id", "")
+            if course_id and work_id:
+                key = f"{course_id}_{work_id}"
+                if key in work_url_map:
+                    return work_url_map[key]
+            return None
+
+        for item in hw_items:
+            hw_url = find_work_url(item)
+            if not hw_url:
+                course_id = item.get("course_id", "")
+                clazz_id = item.get("clazz_id", "")
+                if course_id and clazz_id:
+                    hw_url = self._build_homework_url(course_id, clazz_id)
+                else:
+                    hw_url = self._fix_url(item.get("raw", ""))
+            homework_list.append(HomeworkItem(
+                title=item["title"],
+                course=item["course"],
+                deadline=item["deadline"],
+                platform=self.PLATFORM,
+                submitted=not item["uncommitted"],
+                url=hw_url,
+            ))
+        print(f"[超星] 从作业页面获取到 {len(hw_items)} 项作业")
 
         seen_exam_ids = set()
         try:
@@ -381,9 +499,13 @@ class ChaoXingClient:
                     continue
                 seen_exam_ids.add(key)
                 if not item["finished"] and not item["expired"]:
-                    exam_url = item.get("raw", "")
-                    if exam_url and not exam_url.startswith("http"):
-                        exam_url = f"https://mooc1-api.chaoxing.com{exam_url}"
+                    course_id = item.get("course_id", "")
+                    class_id = item.get("class_id", "")
+                    exam_id = item.get("exam_id", "")
+                    if course_id and class_id and exam_id:
+                        exam_url = self._build_exam_url(course_id, class_id, exam_id)
+                    else:
+                        exam_url = self._fix_url(item.get("raw", ""))
                     homework_list.append(HomeworkItem(
                         title=item["title"],
                         course="考试",
@@ -407,8 +529,7 @@ class ChaoXingClient:
                 if not item["finished"] and not item["expired"]:
                     exam_url = ""
                     if item["course_id"] and item["class_id"] and item["exam_id"]:
-                        cpi = cpi_map.get(item["course_id"], "0")
-                        exam_url = f"https://mooc1.chaoxing.com/exam-ans/exam/test/examcode/examnotes?courseId={item['course_id']}&classId={item['class_id']}&examId={item['exam_id']}&cpi={cpi}"
+                        exam_url = self._build_exam_url(item["course_id"], item["class_id"], item["exam_id"])
                     homework_list.append(HomeworkItem(
                         title=item["title"],
                         course="考试",
@@ -426,7 +547,9 @@ class ChaoXingClient:
                 activities = self._get_activities(course)
                 for act in activities:
                     if act["ongoing"] and act["activeType"] not in (0, 2):
-                        act_url = f"https://mooc1.chaoxing.com/mooc-ans/mooc2/work/dowork?courseId={act['courseId']}&classId={act['clazzId']}&cpi={cpi_map.get(act['courseId'], '0')}&workId=0"
+                        if act["deadline"] and act["deadline"] < datetime.now():
+                            continue
+                        act_url = self._build_activity_url(act["courseId"], act["clazzId"])
                         homework_list.append(HomeworkItem(
                             title=act["title"],
                             course=act["courseName"],
@@ -535,6 +658,8 @@ class KeTangPaiClient:
                         except (ValueError, OSError):
                             pass
                     submitted = item.get("mstatus") == 1
+                    if submitted and deadline and deadline < datetime.now():
+                        continue
                     course_name = course.get("coursename", course.get("name", "未知课程"))
                     ktp_url = f"https://w.ketangpai.com/homework?id={item.get('id', '')}&courseId={course['id']}&courseRole=0"
                     homework_list.append(HomeworkItem(
@@ -768,6 +893,8 @@ class YuKeTangClient:
                                 deadline = begin_time + timedelta(seconds=int(duration))
                             except (ValueError, OSError):
                                 pass
+                    if submitted and deadline and deadline < datetime.now():
+                        continue
                     ykt_url = f"https://changjiang.yuketang.cn/v2/web/studentLog/{classroom_id}"
                     if courseware_id:
                         ykt_url = f"https://changjiang.yuketang.cn/v2/web/trans/{classroom_id}/{courseware_id}?status=1"
