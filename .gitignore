@@ -1,0 +1,16 @@
+config.json
+.pixi
+/ref
+/__pycache__
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.spec
+*.exe
+.env
+.env.*
+*.log
+.DS_Store
+Thumbs.db

@@ -1,0 +1,18 @@
+{
+  "chaoxing": {
+    "enabled": false,
+    "user": "超星账号",
+    "password": "超星密码"
+  },
+  "ketangpai": {
+    "enabled": false,
+    "email": "课堂派账号邮箱",
+    "password": "课堂派密码"
+  },
+  "yuketang": {
+    "enabled": false,
+    "csrftoken": "",
+    "sessionid": "",
+    "university_id": "3078"
+  }
+}
