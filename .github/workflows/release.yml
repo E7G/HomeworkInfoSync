@@ -19,7 +19,7 @@ jobs:
           run-install: true
 
       - name: Build with PyInstaller
-        run: pixi run pyinstaller --noconfirm --onefile --windowed --name HomeworkSync --icon icon.ico --add-data "config.example.json;." --add-data "icon.png;." gui.py
+        run: pixi run pyinstaller --noconfirm --onefile --windowed --name HomeworkSync --icon icon.ico --add-data "config.example.json;." --add-data "icon.png;." --add-data "icon.ico;." gui.py
 
       - name: Create Release
         uses: softprops/action-gh-release@v2

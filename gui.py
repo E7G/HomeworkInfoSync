@@ -16,7 +16,13 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QSize, QTimer, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import QFont, QColor, QIcon, QPainter, QPen, QBrush, QPixmap, QGradient, QCursor
 
-CONFIG_PATH = Path(__file__).parent / "config.json"
+def _app_dir():
+    if getattr(sys, 'frozen', False):
+        return Path(sys.executable).parent
+    return Path(__file__).parent
+
+
+CONFIG_PATH = _app_dir() / "config.json"
 
 DEFAULT_CONFIG = {
     "chaoxing": {"enabled": False, "user": "", "password": ""},
@@ -1068,10 +1074,12 @@ QProgressBar#fetchProgress::chunk {
 """
 
 
-ICON_PATH = Path(__file__).parent / "icon.png"
+ICON_PATH = _app_dir() / "icon.png"
+ICO_PATH = _app_dir() / "icon.ico"
 
 
 def main():
+    QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setStyleSheet(GLOBAL_STYLE)
@@ -1079,8 +1087,15 @@ def main():
     font = QFont("Segoe UI", 9)
     app.setFont(font)
 
-    if ICON_PATH.exists():
-        app.setWindowIcon(QIcon(str(ICON_PATH)))
+    icon = QIcon()
+    if ICO_PATH.exists():
+        icon = QIcon(str(ICO_PATH))
+    elif ICON_PATH.exists():
+        pixmap = QPixmap(str(ICON_PATH))
+        for s in [16, 24, 32, 48, 64, 128, 256]:
+            icon.addPixmap(pixmap.scaled(s, s, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+    if not icon.isNull():
+        app.setWindowIcon(icon)
 
     win = MainWindow()
     win.show()
