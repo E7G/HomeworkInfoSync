@@ -10,7 +10,13 @@ from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
 
-CONFIG_PATH = Path(__file__).parent / "config.json"
+def _app_dir():
+    if getattr(sys, 'frozen', False):
+        return Path(sys.executable).parent
+    return Path(__file__).parent
+
+
+CONFIG_PATH = _app_dir() / "config.json"
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
@@ -18,10 +24,14 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 def load_config():
     if not CONFIG_PATH.exists():
         print(f"配置文件不存在: {CONFIG_PATH}")
-        print("请参考 config.example.json 创建 config.json")
-        sys.exit(1)
+        return {}
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def save_config(cfg):
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
 
 
 class HomeworkItem:
