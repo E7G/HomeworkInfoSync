@@ -16,6 +16,12 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QSize, QTimer, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import QFont, QColor, QIcon, QPainter, QPen, QBrush, QPixmap, QGradient, QCursor
 
+def _resource_dir():
+    if getattr(sys, 'frozen', False):
+        return Path(sys._MEIPASS)
+    return Path(__file__).parent
+
+
 def _app_dir():
     if getattr(sys, 'frozen', False):
         return Path(sys.executable).parent
@@ -1074,8 +1080,8 @@ QProgressBar#fetchProgress::chunk {
 """
 
 
-ICON_PATH = _app_dir() / "icon.png"
-ICO_PATH = _app_dir() / "icon.ico"
+ICON_PATH = _resource_dir() / "icon.png"
+ICO_PATH = _resource_dir() / "icon.ico"
 
 
 def main():
