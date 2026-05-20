@@ -92,10 +92,10 @@ git push origin v0.1.0
 本项目开发过程中参考了以下开源项目，感谢它们的贡献：
 
 - [Raincourse](https://github.com/aglorice/Raincourse) — 雨课堂作业相关实现参考（MIT License）
-- [yuketangHelperBUU](https://github.com/SSRSH/yuketangHelperBUU) — 长江雨课堂 WebSocket 扫码登录实现参考
+- [yuketangHelperBUU](https://github.com/MuWinds/yuketangHelperBUU) — 长江雨课堂 WebSocket 扫码登录实现参考
 - [chaoxing-list](https://github.com/Cooanyh/chaoxing-list) — 超星/学习通作业与考试列表实现参考（AGPL-3.0）
 - [ketangpai-content-gripper](https://github.com/JiangGe-Ch/ketangpai-content-gripper) — 课堂派 API 调用实现参考（Apache-2.0）
-- homeworkHelper.py — 雨课堂作业获取实现参考（zk chen & MR.Li）
+- [yuketangHelper](https://github.com/heyblackC/yuketangHelper) — 雨课堂作业获取实现参考（heyblackC & zk chen & MR.Li）
 
 ## 许可证
 
