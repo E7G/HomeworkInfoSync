@@ -14,15 +14,41 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: prefix-dev/setup-pixi@v0.8.4
-        with:
-          run-install: true
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Build with PyInstaller
-        run: pixi run pyinstaller --noconfirm --onefile --windowed --name HomeworkSync --icon icon.ico --add-data "config.example.json;." --add-data "icon.png;." --add-data "icon.ico;." --hidden-import websocket --hidden-import qrcode gui.py
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.0'
+          host: windows
+          target: desktop
+          arch: win64_msvc2019_64
+          modules: qtbase
+
+      - name: Build release
+        run: cargo build --release -p homework-app
+        env:
+          QMAKE: ${{ env.QT_ROOT_DIR }}/bin/qmake.exe
+
+      - name: Deploy Qt runtime
+        run: |
+          $qtBin = "$env:QT_ROOT_DIR\bin"
+          $out = "target\release"
+          Copy-Item "$qtBin\Qt6Core.dll" $out
+          Copy-Item "$qtBin\Qt6Gui.dll" $out
+          Copy-Item "$qtBin\Qt6Widgets.dll" $out
+          New-Item -ItemType Directory -Force -Path "$out\platforms" | Out-Null
+          Copy-Item "$env:QT_ROOT_DIR\plugins\platforms\qwindows.dll" "$out\platforms\"
+          Copy-Item "config.example.json" "$out\config.example.json"
+          Copy-Item "icon.ico" "$out\icon.ico"
+
+      - name: Package release zip
+        run: |
+          Compress-Archive -Path target\release\HomeworkSync.exe,target\release\*.dll,target\release\platforms,target\release\config.example.json,target\release\icon.ico -DestinationPath dist\HomeworkSync-win64.zip -Force
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/HomeworkSync.exe
+          files: dist/HomeworkSync-win64.zip
           generate_release_notes: true

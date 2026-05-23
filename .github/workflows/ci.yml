@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.0'
+          host: windows
+          target: desktop
+          arch: win64_msvc2019_64
+          modules: qtbase
+
+      - name: Build GUI
+        run: cargo build --release -p homework-app
+        env:
+          QMAKE: ${{ env.QT_ROOT_DIR }}/bin/qmake.exe
+
+      - name: Build CLI
+        run: cargo build --release -p homework-core --bin homework-remind

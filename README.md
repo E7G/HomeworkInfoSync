@@ -5,97 +5,67 @@
 ## 功能
 
 - **多平台支持**：超星/学习通、课堂派、长江雨课堂
-- **GUI 界面**：基于 PyQt6 的深色主题界面，支持作业卡片展示、紧急程度标记
+- **Qt Widgets 图形界面（Rust + Qt6）**：原生 QWidget，冷启动快；打开即显示本地缓存，后台静默刷新
 - **扫码登录**：长江雨课堂支持微信扫码登录，凭证自动保存
-- **命令行模式**：支持终端输出作业提醒，方便脚本调用
+- **命令行模式**：`homework-remind` 适合脚本调用
 
-## 截图
+## 环境要求
 
-> 运行 `pixi run gui` 启动 GUI 界面
+- [Rust](https://rustup.rs/) 1.75+
+- **Qt 6**（含 Widgets、Gui 模块）
+  - Windows：安装 [Qt Online Installer](https://www.qt.io/download-qt-installer) 或 `winget install Qt.Qt.6`
+  - 设置环境变量 `CMAKE_PREFIX_PATH` 指向 Qt 安装目录（例如 `C:\Qt\6.8.0\msvc2019_64`）
 
 ## 快速开始
-
-### 环境要求
-
-- [pixi](https://pixi.sh/) 包管理器
-
-### 安装
 
 ```bash
 git clone https://github.com/E7G/HomeworkInfoSync.git
 cd HomeworkInfoSync
-pixi install
+
+# 编译 GUI（Release 推荐，体积更小、启动更快）
+cargo build --release -p homework-app
+
+# 复制示例配置到 exe 同目录
+cp config.example.json target/release/config.json
+
+# 运行
+./target/release/HomeworkSync.exe   # Windows
 ```
+
+首次打开会立即显示 `homework_cache.json` 中的缓存；已配置的平台会在后台自动刷新。
 
 ### 配置
 
-复制示例配置文件并填写账号信息：
+复制 `config.example.json` 为 `config.json`，填写各平台账号。程序会按顺序查找：
+
+1. 环境变量 `HOMEWORK_CONFIG` 指定的路径
+2. 从可执行文件所在目录向上逐级查找 `config.json`（`cargo run` 时可找到仓库根目录的配置）
+3. 从当前工作目录向上查找
+
+发布版建议将 `config.json` 放在 `HomeworkSync.exe` 同目录。长江雨课堂推荐在 GUI 配置页扫码登录。
+
+### 命令行
 
 ```bash
-cp config.example.json config.json
+cargo run --release -p homework-core --bin homework-remind
 ```
-
-编辑 `config.json`，填入各平台账号：
-
-```json
-{
-  "chaoxing": {
-    "enabled": true,
-    "user": "超星账号",
-    "password": "超星密码"
-  },
-  "ketangpai": {
-    "enabled": true,
-    "email": "课堂派邮箱",
-    "password": "课堂派密码"
-  },
-  "yuketang": {
-    "enabled": false,
-    "csrftoken": "",
-    "sessionid": "",
-    "university_id": "3078"
-  }
-}
-```
-
-长江雨课堂推荐通过 GUI 界面扫码登录，无需手动填写凭证。
-
-### 运行
-
-```bash
-# GUI 模式
-pixi run gui
-
-# 命令行模式
-pixi run remind
-```
-
-## 打包
-
-```bash
-pixi run pyinstaller --noconfirm --onefile --windowed --name HomeworkSync --add-data "config.example.json;." gui.py
-```
-
-生成的可执行文件在 `dist/` 目录下。
 
 ## 发布
 
-推送 `v*` 格式的 tag 即可触发 GitHub Actions 自动构建并发布到 Release：
+推送 `v*` 标签触发 GitHub Actions 构建 Windows Release 包：
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 ## 致谢
 
-本项目开发过程中参考了以下开源项目，感谢它们的贡献：
-
-- [Raincourse](https://github.com/aglorice/Raincourse) — 雨课堂作业相关实现参考（MIT License）
-- [yuketangHelperBUU](https://github.com/MuWinds/yuketangHelperBUU) — 长江雨课堂 WebSocket 扫码登录实现参考
-- [chaoxing-list](https://github.com/Cooanyh/chaoxing-list) — 超星/学习通作业与考试列表实现参考（AGPL-3.0）
-- [ketangpai-content-gripper](https://github.com/JiangGe-Ch/ketangpai-content-gripper) — 课堂派 API 调用实现参考（Apache-2.0）
-- [yuketangHelper](https://github.com/heyblackC/yuketangHelper) — 雨课堂作业获取实现参考（heyblackC & zk chen & MR.Li）
+- [Raincourse](https://github.com/aglorice/Raincourse)
+- [yuketangHelperBUU](https://github.com/MuWinds/yuketangHelperBUU)
+- [chaoxing-list](https://github.com/Cooanyh/chaoxing-list)
+- [ketangpai-content-gripper](https://github.com/JiangGe-Ch/ketangpai-content-gripper)
+- [yuketangHelper](https://github.com/heyblackC/yuketangHelper)
 
 ## 许可证
 

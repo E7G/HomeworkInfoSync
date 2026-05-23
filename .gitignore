@@ -1,14 +1,9 @@
 config.json
-.pixi
+homework_cache.json
+/target
 /ref
-/__pycache__
-*.pyc
-*.pyo
-*.egg-info/
 dist/
 build/
-*.spec
-*.exe
 .env
 .env.*
 *.log
