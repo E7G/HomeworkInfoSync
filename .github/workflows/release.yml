@@ -44,7 +44,18 @@ jobs:
 
       - name: Package release zip
         run: |
-          Compress-Archive -Path target\release\HomeworkSync.exe,target\release\*.dll,target\release\platforms,target\release\config.example.json,target\release\icon.ico -DestinationPath dist\HomeworkSync-win64.zip -Force
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $zip = "dist\HomeworkSync-win64.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Compress-Archive -Path @(
+            "target\release\HomeworkSync.exe",
+            "target\release\Qt6Core.dll",
+            "target\release\Qt6Gui.dll",
+            "target\release\Qt6Widgets.dll",
+            "target\release\platforms",
+            "target\release\config.example.json",
+            "target\release\icon.ico"
+          ) -DestinationPath $zip -CompressionLevel Optimal
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
