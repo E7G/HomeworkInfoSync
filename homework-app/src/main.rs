@@ -1,3 +1,6 @@
+// Release GUI: no console window on Windows (debug builds keep console for logs).
+#![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
+
 mod controller;
 mod ffi;
 
