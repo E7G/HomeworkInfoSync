@@ -1,6 +1,6 @@
 use crate::clients::UA;
 use crate::models::HomeworkItem;
-use chrono::{Duration, Local, NaiveDateTime};
+use chrono::{Datelike, Duration, Local, NaiveDateTime};
 use regex::Regex;
 use reqwest::blocking::Client;
 use scraper::{Html, Selector};
@@ -159,23 +159,70 @@ impl ChaoxingClient {
         Ok(courses)
     }
 
-    fn parse_left_time(left_time: &str) -> Option<NaiveDateTime> {
-        if left_time.is_empty() {
+    /// Parse deadline from relative text (e.g. "2小时26分钟") or absolute datetime.
+    /// Matches ref/chaoxing-list `parseTimeToMinutes` — all day/hour/minute parts are summed.
+    pub(crate) fn parse_deadline_text(text: &str) -> Option<NaiveDateTime> {
+        let s = text.trim();
+        if s.is_empty() || s.contains("无截止") {
             return None;
         }
-        let now = Local::now().naive_local();
-        let re = Regex::new(r"(\d+)").ok()?;
-        if left_time.contains("小时") {
-            let hours: i64 = re.captures(left_time)?.get(1)?.as_str().parse().ok()?;
-            return now.checked_add_signed(Duration::hours(hours));
+
+        for fmt in [
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
+            "%Y/%m/%d %H:%M",
+        ] {
+            if let Ok(dt) = NaiveDateTime::parse_from_str(s, fmt) {
+                return Some(dt);
+            }
         }
-        if left_time.contains("天") {
-            let days: i64 = re.captures(left_time)?.get(1)?.as_str().parse().ok()?;
-            return now.checked_add_signed(Duration::days(days));
+
+        if let Ok(re) = Regex::new(r"(\d{4}-\d{2}-\d{2}\s*\d{2}:\d{2})") {
+            if let Some(c) = re.captures(s) {
+                if let Ok(dt) = NaiveDateTime::parse_from_str(c[1].trim(), "%Y-%m-%d %H:%M") {
+                    return Some(dt);
+                }
+            }
         }
-        if left_time.contains("分钟") || left_time.contains("分") {
-            let minutes: i64 = re.captures(left_time)?.get(1)?.as_str().parse().ok()?;
-            return now.checked_add_signed(Duration::minutes(minutes));
+
+        if let Ok(re) = Regex::new(r"(\d{2}-\d{2}\s+\d{2}:\d{2})") {
+            if let Some(c) = re.captures(s) {
+                let year = Local::now().year();
+                let full = format!("{year}-{}", c[1].trim());
+                if let Ok(dt) = NaiveDateTime::parse_from_str(&full, "%Y-%m-%d %H:%M") {
+                    return Some(dt);
+                }
+            }
+        }
+
+        if s.contains("过期") || s.contains("已结束") {
+            return None;
+        }
+
+        let mut total_minutes: i64 = 0;
+        if let Ok(re_day) = Regex::new(r"(\d+)\s*天") {
+            if let Some(c) = re_day.captures(s) {
+                total_minutes += c[1].parse::<i64>().ok()? * 24 * 60;
+            }
+        }
+        if let Ok(re_hour) = Regex::new(r"(\d+)\s*小时") {
+            if let Some(c) = re_hour.captures(s) {
+                total_minutes += c[1].parse::<i64>().ok()? * 60;
+            }
+        }
+        if let Ok(re_min) = Regex::new(r"(\d+)\s*分钟") {
+            if let Some(c) = re_min.captures(s) {
+                total_minutes += c[1].parse::<i64>().ok()?;
+            }
+        } else if let Ok(re_min) = Regex::new(r"(\d+)\s*分") {
+            if let Some(c) = re_min.captures(s) {
+                total_minutes += c[1].parse::<i64>().ok()?;
+            }
+        }
+
+        if total_minutes > 0 {
+            let now = Local::now().naive_local();
+            return now.checked_add_signed(Duration::minutes(total_minutes));
         }
         None
     }
@@ -246,7 +293,7 @@ impl ChaoxingClient {
                 title,
                 course,
                 uncommitted,
-                deadline: Self::parse_left_time(&left_time),
+                deadline: Self::parse_deadline_text(&left_time),
                 work_id: qs.get("taskrefId").cloned().unwrap_or_default(),
                 course_id: qs.get("courseId").cloned().unwrap_or_default(),
                 clazz_id: qs.get("clazzId").cloned().unwrap_or_default(),
@@ -301,8 +348,12 @@ impl ChaoxingClient {
                 title,
                 expired,
                 finished,
-                deadline: Self::parse_left_time(&time_left),
-                exam_id: qs.get("taskrefId").cloned().unwrap_or_default(),
+                deadline: Self::parse_deadline_text(&time_left),
+                exam_id: qs
+                    .get("taskrefId")
+                    .or_else(|| qs.get("examId"))
+                    .cloned()
+                    .unwrap_or_default(),
                 course_id: qs.get("courseId").cloned().unwrap_or_default(),
                 class_id: qs.get("classId").cloned().unwrap_or_default(),
                 raw,
@@ -347,9 +398,11 @@ impl ChaoxingClient {
                 .captures(onclick)
                 .map(|c| c[1].to_string())
                 .unwrap_or_default();
-            let deadline = re_date.captures(&time_range).and_then(|c| {
-                NaiveDateTime::parse_from_str(c[1].trim(), "%Y-%m-%d %H:%M").ok()
-            });
+            // Use the last datetime in the range as the submission deadline.
+            let deadline = re_date
+                .captures_iter(&time_range)
+                .filter_map(|c| NaiveDateTime::parse_from_str(c[1].trim(), "%Y-%m-%d %H:%M").ok())
+                .last();
             items.push(ExamRow {
                 title,
                 expired,
@@ -370,13 +423,73 @@ impl ChaoxingClient {
         )
     }
 
+    fn normalize_exam_title(title: &str) -> String {
+        title
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .to_lowercase()
+    }
+
+    /// Register exam keys; returns false if this exam was already seen (duplicate).
+    pub(crate) fn register_exam_seen(seen: &mut HashSet<String>, item: &ExamRow) -> bool {
+        let mut keys = Vec::new();
+        if !item.exam_id.is_empty() {
+            keys.push(format!("id:{}", item.exam_id));
+            if !item.course_id.is_empty() {
+                keys.push(format!(
+                    "c:{}:{}:{}",
+                    item.course_id, item.class_id, item.exam_id
+                ));
+            }
+        }
+        let norm = Self::normalize_exam_title(&item.title);
+        if !norm.is_empty() {
+            keys.push(format!("t:{norm}"));
+            if !item.course_id.is_empty() {
+                keys.push(format!("ct:{}:{norm}", item.course_id));
+            }
+        }
+        if keys.is_empty() {
+            return true;
+        }
+        if keys.iter().any(|k| seen.contains(k)) {
+            return false;
+        }
+        for k in keys {
+            seen.insert(k);
+        }
+        true
+    }
+
+    fn push_exam(homework: &mut Vec<HomeworkItem>, item: ExamRow) {
+        let url = if !item.course_id.is_empty()
+            && !item.class_id.is_empty()
+            && !item.exam_id.is_empty()
+        {
+            Self::build_exam_url(&item.course_id, &item.class_id, &item.exam_id)
+        } else if !item.raw.is_empty() {
+            Self::fix_url(&item.raw)
+        } else {
+            String::new()
+        };
+        homework.push(HomeworkItem {
+            title: item.title,
+            course: "考试".to_string(),
+            deadline: item.deadline,
+            platform: Self::PLATFORM.to_string(),
+            submitted: false,
+            url,
+        });
+    }
+
     fn build_exam_url(course_id: &str, class_id: &str, exam_id: &str) -> String {
         format!(
             "https://mooc1.chaoxing.com/exam-ans/exam/test/examcode/examnotes?courseId={course_id}&classId={class_id}&examId={exam_id}"
         )
     }
 
-    fn get_work_urls(&self, course: &CxCourse) -> HashMap<String, String> {
+    fn get_work_list(&self, course: &CxCourse) -> HashMap<String, (String, Option<NaiveDateTime>)> {
         let mut map = HashMap::new();
         let visit = match self
             .client
@@ -441,10 +554,27 @@ impl ChaoxingClient {
             }
             let full_url = Self::fix_url(data_url);
             let qs = Self::query_params(data_url);
-            let work_id = qs.get("workId").cloned().unwrap_or_default();
+            let work_id = qs
+                .get("workId")
+                .or_else(|| qs.get("taskrefId"))
+                .cloned()
+                .unwrap_or_default();
+            let time_text = li
+                .select(&Selector::parse(".time.notOver").unwrap())
+                .next()
+                .or_else(|| li.select(&Selector::parse(".time").unwrap()).next())
+                .map(|e| e.text().collect::<String>().trim().to_string())
+                .unwrap_or_default();
+            let deadline = Self::parse_deadline_text(&time_text);
             if !work_id.is_empty() {
                 let key = format!("{}_{}", course.course_id, work_id);
-                map.entry(key).or_insert(full_url);
+                map.entry(key).or_insert((full_url.clone(), deadline));
+                if let Some(taskref) = qs.get("taskrefId") {
+                    if *taskref != work_id {
+                        let key2 = format!("{}_{}", course.course_id, taskref);
+                        map.entry(key2).or_insert((full_url, deadline));
+                    }
+                }
             }
         }
         map
@@ -474,26 +604,28 @@ impl ChaoxingClient {
                 needed.insert(item.course_id.clone());
             }
         }
-        let mut work_url_map = HashMap::new();
+        let mut work_list_map = HashMap::new();
         for cid in needed {
             if let Some(course) = course_map.get(&cid) {
-                work_url_map.extend(self.get_work_urls(course));
+                work_list_map.extend(self.get_work_list(course));
             }
         }
 
         for item in hw_items {
             let key = format!("{}_{}", item.course_id, item.work_id);
-            let hw_url = work_url_map.get(&key).cloned().or_else(|| {
-                if !item.course_id.is_empty() && !item.clazz_id.is_empty() {
-                    Some(Self::build_homework_url(&item.course_id, &item.clazz_id))
+            let (hw_url, list_deadline) = work_list_map.get(&key).cloned().unwrap_or_else(|| {
+                let fallback_url = if !item.course_id.is_empty() && !item.clazz_id.is_empty() {
+                    Self::build_homework_url(&item.course_id, &item.clazz_id)
                 } else {
-                    Some(Self::fix_url(&item.raw))
-                }
-            }).unwrap_or_default();
+                    Self::fix_url(&item.raw)
+                };
+                (fallback_url, None)
+            });
+            let deadline = list_deadline.or(item.deadline);
             homework.push(HomeworkItem {
                 title: item.title,
                 course: item.course,
-                deadline: item.deadline,
+                deadline,
                 platform: Self::PLATFORM.to_string(),
                 submitted: !item.uncommitted,
                 url: hw_url,
@@ -501,40 +633,7 @@ impl ChaoxingClient {
         }
 
         let mut seen_exams = HashSet::new();
-        if let Ok(exam_html) = self
-            .client
-            .get("https://mooc1-api.chaoxing.com/exam-ans/exam/phone/examcode")
-            .send()
-            .and_then(|r| r.text())
-        {
-            for item in Self::extract_exams(&exam_html) {
-                let key = if item.exam_id.is_empty() {
-                    item.title.clone()
-                } else {
-                    item.exam_id.clone()
-                };
-                if !seen_exams.insert(key) || item.finished || item.expired {
-                    continue;
-                }
-                let url = if !item.course_id.is_empty()
-                    && !item.class_id.is_empty()
-                    && !item.exam_id.is_empty()
-                {
-                    Self::build_exam_url(&item.course_id, &item.class_id, &item.exam_id)
-                } else {
-                    Self::fix_url(&item.raw)
-                };
-                homework.push(HomeworkItem {
-                    title: item.title,
-                    course: "考试".to_string(),
-                    deadline: item.deadline,
-                    platform: Self::PLATFORM.to_string(),
-                    submitted: false,
-                    url,
-                });
-            }
-        }
-
+        // Prefer examlist table first (accurate deadline); phone API may repeat the same exam.
         if let Ok(list_html) = self
             .client
             .get("https://mooc1.chaoxing.com/exam-ans/exam/test/examcode/examlist?edition=1&nohead=0&fid=")
@@ -542,34 +641,91 @@ impl ChaoxingClient {
             .and_then(|r| r.text())
         {
             for item in Self::extract_exams_table(&list_html) {
-                let key = if item.exam_id.is_empty() {
-                    item.title.clone()
-                } else {
-                    item.exam_id.clone()
-                };
-                if !seen_exams.insert(key) || item.finished || item.expired {
+                if item.finished || item.expired {
                     continue;
                 }
-                let url = if !item.course_id.is_empty()
-                    && !item.class_id.is_empty()
-                    && !item.exam_id.is_empty()
-                {
-                    Self::build_exam_url(&item.course_id, &item.class_id, &item.exam_id)
-                } else {
-                    String::new()
-                };
-                homework.push(HomeworkItem {
-                    title: item.title,
-                    course: "考试".to_string(),
-                    deadline: item.deadline,
-                    platform: Self::PLATFORM.to_string(),
-                    submitted: false,
-                    url,
-                });
+                if Self::register_exam_seen(&mut seen_exams, &item) {
+                    Self::push_exam(&mut homework, item);
+                }
+            }
+        }
+
+        if let Ok(exam_html) = self
+            .client
+            .get("https://mooc1-api.chaoxing.com/exam-ans/exam/phone/examcode")
+            .send()
+            .and_then(|r| r.text())
+        {
+            for item in Self::extract_exams(&exam_html) {
+                if item.finished || item.expired {
+                    continue;
+                }
+                if Self::register_exam_seen(&mut seen_exams, &item) {
+                    Self::push_exam(&mut homework, item);
+                }
             }
         }
 
         crate::hw_log!("[超星] 共获取到 {} 项作业/考试/任务", homework.len());
         Ok(homework)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ChaoxingClient, ExamRow};
+    use chrono::{Duration, Local};
+    use std::collections::HashSet;
+
+    #[test]
+    fn parse_deadline_combines_hours_and_minutes() {
+        let before = Local::now().naive_local();
+        let dt = ChaoxingClient::parse_deadline_text("剩余2小时26分钟").expect("parsed");
+        let after = Local::now().naive_local();
+        let expect_min = before + Duration::hours(2) + Duration::minutes(26);
+        let expect_max = after + Duration::hours(2) + Duration::minutes(26);
+        assert!(dt >= expect_min - Duration::seconds(2));
+        assert!(dt <= expect_max + Duration::seconds(2));
+    }
+
+    #[test]
+    fn parse_deadline_absolute_datetime() {
+        let dt = ChaoxingClient::parse_deadline_text("2026-05-24 16:03").expect("parsed");
+        assert_eq!(dt.format("%Y-%m-%d %H:%M").to_string(), "2026-05-24 16:03");
+    }
+
+    #[test]
+    fn exam_dedup_by_title_when_ids_differ() {
+        let mut seen = HashSet::new();
+        let a = ExamRow {
+            title: "动手学AI：人工智能通识与实践".to_string(),
+            expired: false,
+            finished: false,
+            deadline: None,
+            exam_id: "111".to_string(),
+            course_id: "1".to_string(),
+            class_id: "2".to_string(),
+            raw: String::new(),
+        };
+        let b = ExamRow {
+            title: a.title.clone(),
+            expired: false,
+            finished: false,
+            deadline: None,
+            exam_id: "222".to_string(),
+            course_id: a.course_id.clone(),
+            class_id: a.class_id.clone(),
+            raw: String::new(),
+        };
+        assert!(ChaoxingClient::register_exam_seen(&mut seen, &a));
+        assert!(!ChaoxingClient::register_exam_seen(&mut seen, &b));
+    }
+
+    #[test]
+    fn parse_deadline_hours_only_not_minutes_from_hour_branch() {
+        let before = Local::now().naive_local();
+        let dt = ChaoxingClient::parse_deadline_text("3小时").expect("parsed");
+        let delta = dt - before;
+        assert!(delta.num_minutes() >= 179 && delta.num_minutes() <= 181);
     }
 }
