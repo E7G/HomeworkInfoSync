@@ -10,6 +10,51 @@ use std::time::Duration as StdDuration;
 use tokio::runtime::Runtime;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
+/// Parse API numeric fields that may be JSON numbers or numeric strings.
+fn json_int(v: Option<&Value>) -> Option<i64> {
+    let v = v?;
+    v.as_i64()
+        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        .or_else(|| v.as_bool().map(i64::from))
+}
+
+fn json_timestamp_positive(v: Option<&Value>) -> bool {
+    json_int(v).is_some_and(|n| n > 0)
+}
+
+/// Student submission state for learn-log homework (`actype=5` activities).
+///
+/// Aligns with [Raincourse `WorkStatus`](https://github.com/aglorice/Raincourse/blob/master/utils/schema.py):
+/// `0`/`1` = not submitted, `2`/`3` = graded, `5` = committed, `6` = absent.
+///
+/// `status == 5` alone is not enough: partial answers are autosaved with `status` 5 but no
+/// final submit timestamp (web UI treats submission as `!!problem.user.submit_time`).
+fn yuketang_is_submitted(act: &Value) -> bool {
+    match json_int(act.get("status")) {
+        Some(2 | 3) => true,
+        Some(5) => yuketang_has_final_submit(act),
+        _ => false,
+    }
+}
+
+fn yuketang_has_final_submit(act: &Value) -> bool {
+    if act.get("is_submitted").and_then(|v| v.as_bool()) == Some(true) {
+        return true;
+    }
+    for key in ["submit_time", "submitTime", "commit_time", "commitTime"] {
+        if json_timestamp_positive(act.get(key)) {
+            return true;
+        }
+    }
+    if let Some(user) = act.get("user") {
+        if json_timestamp_positive(user.get("submit_time")) || json_timestamp_positive(user.get("submitTime"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 pub struct YuketangClient {
     csrftoken: String,
     sessionid: String,
@@ -298,8 +343,7 @@ impl YuketangClient {
                 .into_iter()
                 .flatten()
             {
-                let status = act.get("status").and_then(|v| v.as_i64()).unwrap_or(0);
-                let submitted = matches!(status, 2 | 3 | 5);
+                let submitted = yuketang_is_submitted(act);
                 let title = act
                     .get("title")
                     .and_then(|v| v.as_str())
@@ -378,4 +422,45 @@ pub fn render_qr_png(url: &str) -> io::Result<Vec<u8>> {
         )
         .map_err(io::Error::other)?;
     Ok(buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn status_not_submitted_is_pending() {
+        assert!(!yuketang_is_submitted(&json!({ "status": 0 })));
+        assert!(!yuketang_is_submitted(&json!({ "status": 1 })));
+    }
+
+    #[test]
+    fn status_graded_is_submitted() {
+        assert!(yuketang_is_submitted(&json!({ "status": 2 })));
+        assert!(yuketang_is_submitted(&json!({ "status": 3 })));
+    }
+
+    #[test]
+    fn status_five_without_submit_time_is_partial() {
+        let partial = json!({ "status": 5, "title": "quiz" });
+        assert!(!yuketang_is_submitted(&partial));
+    }
+
+    #[test]
+    fn status_five_with_submit_time_is_submitted() {
+        let done = json!({ "status": 5, "submit_time": 1_700_000_000_000_i64 });
+        assert!(yuketang_is_submitted(&done));
+    }
+
+    #[test]
+    fn status_five_with_is_submitted_flag() {
+        let done = json!({ "status": 5, "is_submitted": true });
+        assert!(yuketang_is_submitted(&done));
+    }
+
+    #[test]
+    fn status_absent_is_pending() {
+        assert!(!yuketang_is_submitted(&json!({ "status": 6 })));
+    }
 }
