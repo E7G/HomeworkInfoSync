@@ -432,7 +432,7 @@ impl ChaoxingClient {
     }
 
     /// Register exam keys; returns false if this exam was already seen (duplicate).
-    pub(crate) fn register_exam_seen(seen: &mut HashSet<String>, item: &ExamRow) -> bool {
+    fn register_exam_seen(seen: &mut HashSet<String>, item: &ExamRow) -> bool {
         let mut keys = Vec::new();
         if !item.exam_id.is_empty() {
             keys.push(format!("id:{}", item.exam_id));
