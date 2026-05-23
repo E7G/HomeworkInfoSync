@@ -61,6 +61,7 @@ git push origin v0.2.0
 
 ## 致谢
 
+- [new_xxt](https://github.com/aglorice/new_xxt) — 超星/学习通作业完整链接获取思路参考
 - [Raincourse](https://github.com/aglorice/Raincourse)
 - [yuketangHelperBUU](https://github.com/MuWinds/yuketangHelperBUU)
 - [chaoxing-list](https://github.com/Cooanyh/chaoxing-list)

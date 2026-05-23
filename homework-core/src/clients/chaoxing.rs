@@ -1,6 +1,6 @@
 use crate::clients::UA;
 use crate::models::HomeworkItem;
-use chrono::{Duration, Local, NaiveDateTime};
+use chrono::{Datelike, Duration, Local, NaiveDate, NaiveDateTime};
 use regex::Regex;
 use reqwest::blocking::Client;
 use scraper::{Html, Selector};
@@ -44,6 +44,11 @@ struct ExamRow {
     course_id: String,
     class_id: String,
     raw: String,
+}
+
+struct WorkEntry {
+    url: String,
+    deadline: Option<NaiveDateTime>,
 }
 
 impl ChaoxingClient {
@@ -159,6 +164,90 @@ impl ChaoxingClient {
         Ok(courses)
     }
 
+    /// Parse deadline from 作答时间 range, absolute dates, or relative "剩余X天".
+    fn parse_time_text(text: &str) -> Option<NaiveDateTime> {
+        let text = text.trim();
+        if text.is_empty() {
+            return None;
+        }
+        if let Some(dt) = Self::parse_answer_time_range(text) {
+            return Some(dt);
+        }
+        Self::parse_left_time(text)
+    }
+
+    fn parse_answer_time_range(text: &str) -> Option<NaiveDateTime> {
+        let re_full = Regex::new(
+            r"(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})\s*至\s*(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})",
+        )
+        .ok()?;
+        if let Some(c) = re_full.captures(text) {
+            return Self::naive_from_ymd_hm(
+                c[6].parse().ok()?,
+                c[7].parse().ok()?,
+                c[8].parse().ok()?,
+                c[9].parse().ok()?,
+                c[10].parse().ok()?,
+            );
+        }
+
+        let re_short = Regex::new(
+            r"(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})\s*至\s*(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})",
+        )
+        .ok()?;
+        if let Some(c) = re_short.captures(text) {
+            return Self::naive_from_month_day(
+                c[5].parse().ok()?,
+                c[6].parse().ok()?,
+                c[7].parse().ok()?,
+                c[8].parse().ok()?,
+            );
+        }
+
+        let re_date = Regex::new(r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})").ok()?;
+        let dates: Vec<NaiveDateTime> = re_date
+            .captures_iter(text)
+            .filter_map(|c| NaiveDateTime::parse_from_str(c[1].trim(), "%Y-%m-%d %H:%M").ok())
+            .collect();
+        if let Some(dt) = dates.last() {
+            return Some(*dt);
+        }
+
+        let re_md = Regex::new(r"(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})").ok()?;
+        let mut last = None;
+        for c in re_md.captures_iter(text) {
+            last = Self::naive_from_month_day(
+                c[1].parse().ok()?,
+                c[2].parse().ok()?,
+                c[3].parse().ok()?,
+                c[4].parse().ok()?,
+            );
+        }
+        last
+    }
+
+    fn naive_from_ymd_hm(
+        year: i32,
+        month: u32,
+        day: u32,
+        hour: u32,
+        minute: u32,
+    ) -> Option<NaiveDateTime> {
+        NaiveDate::from_ymd_opt(year, month, day)?.and_hms_opt(hour, minute, 0)
+    }
+
+    fn naive_from_month_day(month: u32, day: u32, hour: u32, minute: u32) -> Option<NaiveDateTime> {
+        let now = Local::now().naive_local();
+        let year = now.year();
+        let mut dt = NaiveDate::from_ymd_opt(year, month, day)?.and_hms_opt(hour, minute, 0)?;
+        if dt < now - Duration::days(200) {
+            dt = dt.with_year(year + 1)?;
+        } else if dt > now + Duration::days(330) {
+            dt = dt.with_year(year - 1)?;
+        }
+        Some(dt)
+    }
+
     fn parse_left_time(left_time: &str) -> Option<NaiveDateTime> {
         if left_time.is_empty() {
             return None;
@@ -240,13 +329,16 @@ impl ChaoxingClient {
                 .next()
                 .map(|e| e.text().collect::<String>().trim().to_string())
                 .unwrap_or_default();
+            let option_text = option.text().collect::<String>();
+            let deadline = Self::parse_time_text(&left_time)
+                .or_else(|| Self::parse_time_text(&option_text));
             let raw = li.value().attr("data").unwrap_or("").to_string();
             let qs = Self::query_params(&raw);
             items.push(HwRow {
                 title,
                 course,
                 uncommitted,
-                deadline: Self::parse_left_time(&left_time),
+                deadline,
                 work_id: qs.get("taskrefId").cloned().unwrap_or_default(),
                 course_id: qs.get("courseId").cloned().unwrap_or_default(),
                 clazz_id: qs.get("clazzId").cloned().unwrap_or_default(),
@@ -301,7 +393,7 @@ impl ChaoxingClient {
                 title,
                 expired,
                 finished,
-                deadline: Self::parse_left_time(&time_left),
+                deadline: Self::parse_time_text(&time_left),
                 exam_id: qs.get("taskrefId").cloned().unwrap_or_default(),
                 course_id: qs.get("courseId").cloned().unwrap_or_default(),
                 class_id: qs.get("classId").cloned().unwrap_or_default(),
@@ -347,8 +439,13 @@ impl ChaoxingClient {
                 .captures(onclick)
                 .map(|c| c[1].to_string())
                 .unwrap_or_default();
-            let deadline = re_date.captures(&time_range).and_then(|c| {
-                NaiveDateTime::parse_from_str(c[1].trim(), "%Y-%m-%d %H:%M").ok()
+            let deadline = Self::parse_time_text(&time_range).or_else(|| {
+                re_date
+                    .captures_iter(&time_range)
+                    .filter_map(|c| {
+                        NaiveDateTime::parse_from_str(c[1].trim(), "%Y-%m-%d %H:%M").ok()
+                    })
+                    .last()
             });
             items.push(ExamRow {
                 title,
@@ -376,7 +473,7 @@ impl ChaoxingClient {
         )
     }
 
-    fn get_work_urls(&self, course: &CxCourse) -> HashMap<String, String> {
+    fn get_work_entries(&self, course: &CxCourse) -> HashMap<String, WorkEntry> {
         let mut map = HashMap::new();
         let visit = match self
             .client
@@ -426,6 +523,7 @@ impl ChaoxingClient {
         };
         let work_html = work_resp.text().unwrap_or_default();
         let work_doc = Html::parse_document(&work_html);
+        let time_sel = Selector::parse("span.time.notOver, span.time, .time.notOver").unwrap();
         for li in work_doc.select(&Selector::parse("li").unwrap()) {
             let data_url = li.value().attr("data").unwrap_or("");
             if data_url.is_empty() {
@@ -439,12 +537,23 @@ impl ChaoxingClient {
             if title.is_empty() {
                 continue;
             }
+            let time_text = li
+                .select(&time_sel)
+                .next()
+                .map(|e| e.text().collect::<String>().trim().to_string())
+                .unwrap_or_default();
+            let li_text = li.text().collect::<String>();
+            let deadline = Self::parse_time_text(&time_text)
+                .or_else(|| Self::parse_time_text(&li_text));
             let full_url = Self::fix_url(data_url);
             let qs = Self::query_params(data_url);
             let work_id = qs.get("workId").cloned().unwrap_or_default();
             if !work_id.is_empty() {
                 let key = format!("{}_{}", course.course_id, work_id);
-                map.entry(key).or_insert(full_url);
+                map.entry(key).or_insert(WorkEntry {
+                    url: full_url,
+                    deadline,
+                });
             }
         }
         map
@@ -474,26 +583,33 @@ impl ChaoxingClient {
                 needed.insert(item.course_id.clone());
             }
         }
-        let mut work_url_map = HashMap::new();
+        let mut work_entry_map = HashMap::new();
         for cid in needed {
             if let Some(course) = course_map.get(&cid) {
-                work_url_map.extend(self.get_work_urls(course));
+                work_entry_map.extend(self.get_work_entries(course));
             }
         }
 
         for item in hw_items {
             let key = format!("{}_{}", item.course_id, item.work_id);
-            let hw_url = work_url_map.get(&key).cloned().or_else(|| {
-                if !item.course_id.is_empty() && !item.clazz_id.is_empty() {
-                    Some(Self::build_homework_url(&item.course_id, &item.clazz_id))
-                } else {
-                    Some(Self::fix_url(&item.raw))
-                }
-            }).unwrap_or_default();
+            let entry = work_entry_map.get(&key);
+            let hw_url = entry
+                .map(|e| e.url.clone())
+                .or_else(|| {
+                    if !item.course_id.is_empty() && !item.clazz_id.is_empty() {
+                        Some(Self::build_homework_url(&item.course_id, &item.clazz_id))
+                    } else {
+                        Some(Self::fix_url(&item.raw))
+                    }
+                })
+                .unwrap_or_default();
+            let deadline = entry
+                .and_then(|e| e.deadline)
+                .or(item.deadline);
             homework.push(HomeworkItem {
                 title: item.title,
                 course: item.course,
-                deadline: item.deadline,
+                deadline,
                 platform: Self::PLATFORM.to_string(),
                 submitted: !item.uncommitted,
                 url: hw_url,
@@ -571,5 +687,30 @@ impl ChaoxingClient {
 
         crate::hw_log!("[超星] 共获取到 {} 项作业/考试/任务", homework.len());
         Ok(homework)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ChaoxingClient;
+    use chrono::{Datelike, Timelike};
+
+    #[test]
+    fn parse_answer_time_range_uses_end() {
+        let text = "题量: 1 满分: 100 作答时间:04-23 21:34至05-23 21:34";
+        let dt = ChaoxingClient::parse_time_text(text).expect("deadline");
+        assert_eq!(dt.month(), 5);
+        assert_eq!(dt.day(), 23);
+        assert_eq!(dt.hour(), 21);
+        assert_eq!(dt.minute(), 34);
+    }
+
+    #[test]
+    fn parse_full_datetime_range_uses_end() {
+        let text = "2025-04-23 21:34至2025-05-23 21:34";
+        let dt = ChaoxingClient::parse_time_text(text).expect("deadline");
+        assert_eq!(dt.year(), 2025);
+        assert_eq!(dt.month(), 5);
+        assert_eq!(dt.day(), 23);
     }
 }
