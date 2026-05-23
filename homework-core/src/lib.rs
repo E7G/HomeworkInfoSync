@@ -19,4 +19,7 @@ pub use config::{
     app_dir, config_path, load_config, resolve_config_path, save_config, AppConfig, PlatformConfig,
 };
 pub use fetch::{fetch_all_homework, save_yuketang_session, FetchResult};
-pub use models::{pending_sorted_by_deadline, HomeworkItem, Urgency};
+pub use models::{
+    homework_headline_counts, homework_stats_debug_report, pending_sorted_by_deadline,
+    HomeworkItem, Urgency,
+};

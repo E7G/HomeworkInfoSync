@@ -8,6 +8,7 @@
 - **Qt Widgets 图形界面（Rust + Qt6）**：原生 QWidget，冷启动快；打开即显示本地缓存，后台静默刷新
 - **扫码登录**：长江雨课堂支持微信扫码登录，凭证自动保存
 - **命令行模式**：`homework-remind` 适合脚本调用
+- **统计说明**：每次刷新后，在「日志」页底部附带与首页一致的数字说明（含分项核对、按平台分解），便于理解与排错
 
 ## 环境要求
 
@@ -48,6 +49,8 @@ cp config.example.json target/release/config.json
 
 ```bash
 cargo run --release -p homework-core --bin homework-remind
+# 在提醒列表后打印与 GUI 日志相同的「统计说明」全文
+cargo run --release -p homework-core --bin homework-remind -- --stats
 ```
 
 ## 发布

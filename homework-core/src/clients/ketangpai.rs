@@ -5,6 +5,32 @@ use reqwest::blocking::Client;
 use serde_json::Value;
 use std::io;
 
+/// Parse API numeric fields that may be JSON numbers or numeric strings.
+fn json_int(v: Option<&Value>) -> Option<i64> {
+    let v = v?;
+    v.as_i64()
+        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        .or_else(|| v.as_bool().map(i64::from))
+}
+
+/// Student submission state for homework (`contenttype` 4).
+///
+/// Use `mstatus` only: `0` = 未提交，非 0 = 已交/已批改等（与 [Axope/ketangpai](https://github.com/Axope/ketangpai) 一致）。
+/// Do not use `timestate` here — it reflects the assignment time window (进行中/已截止等),
+/// not whether the student submitted; treating `timestate >= 1` as submitted marks every
+/// past-deadline item as done.
+fn ketangpai_is_submitted(item: &Value) -> bool {
+    matches!(json_int(item.get("mstatus")), Some(m) if m != 0)
+}
+
+fn parse_endtime(item: &Value) -> Option<NaiveDateTime> {
+    let ts = item
+        .get("endtime")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))?;
+    let secs = if ts > 1_000_000_000_000 { ts / 1000 } else { ts };
+    DateTime::from_timestamp(secs, 0).map(|dt| dt.with_timezone(&Local).naive_local())
+}
+
 pub struct KetangpaiClient {
     email: String,
     password: String,
@@ -177,11 +203,8 @@ impl KetangpaiClient {
                 .unwrap_or("未知课程")
                 .to_string();
             for item in list {
-                let deadline = item
-                    .get("endtime")
-                    .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
-                    .and_then(|ts| DateTime::from_timestamp(ts, 0).map(|dt| dt.naive_utc()));
-                let submitted = item.get("mstatus").and_then(|v| v.as_i64()) == Some(1);
+                let deadline = parse_endtime(&item);
+                let submitted = ketangpai_is_submitted(&item);
                 if submitted
                     && deadline
                         .map(|d| d < Local::now().naive_local())
@@ -211,5 +234,35 @@ impl KetangpaiClient {
         homework.sort_by_key(|h| h.deadline.unwrap_or(NaiveDateTime::MAX));
         crate::hw_log!("[课堂派] 共获取到 {} 项作业", homework.len());
         Ok(homework)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn mstatus_zero_is_pending() {
+        let item = json!({ "timestate": 2, "mstatus": 0 });
+        assert!(!ketangpai_is_submitted(&item));
+    }
+
+    #[test]
+    fn mstatus_graded_is_submitted() {
+        let item = json!({ "mstatus": 2 });
+        assert!(ketangpai_is_submitted(&item));
+    }
+
+    #[test]
+    fn mstatus_submitted_string() {
+        let item = json!({ "mstatus": "1" });
+        assert!(ketangpai_is_submitted(&item));
+    }
+
+    #[test]
+    fn mstatus_one_is_submitted() {
+        let item = json!({ "mstatus": 1 });
+        assert!(ketangpai_is_submitted(&item));
     }
 }

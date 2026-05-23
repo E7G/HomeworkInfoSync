@@ -3,9 +3,9 @@ use crate::ffi::{
     ui_set_refresh_enabled, HwItemC, HwStatsC,
 };
 use homework_core::{
-    fetch_all_homework, load_config, load_homework_cache, pending_sorted_by_deadline, FetchResult,
-    render_qr_png, save_config, save_yuketang_session, AppConfig, HomeworkItem, Urgency,
-    YuketangClient,
+    fetch_all_homework, homework_stats_debug_report, load_config, load_homework_cache,
+    pending_sorted_by_deadline, render_qr_png, save_config, save_yuketang_session, AppConfig,
+    FetchResult, HomeworkItem, Urgency, YuketangClient,
 };
 use std::collections::VecDeque;
 use std::ffi::CString;
@@ -202,11 +202,13 @@ impl AppController {
         self.pending_strings
             .push_back(CString::new(status_msg).unwrap_or_default());
         let status_ptr = self.pending_strings.back().unwrap().as_ptr();
-        let log_display = if log_text.trim().is_empty() {
+        let base_log = if log_text.trim().is_empty() {
             "（无详细日志）".to_string()
         } else {
             log_text
         };
+        let stats_block = homework_stats_debug_report(&items);
+        let log_display = format!("{}\n\n{}", base_log.trim_end(), stats_block);
         self.pending_strings
             .push_back(CString::new(log_display).unwrap_or_default());
         let log_ptr = self.pending_strings.back().unwrap().as_ptr();

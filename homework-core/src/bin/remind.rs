@@ -1,9 +1,17 @@
-use homework_core::{fetch_all_homework, pending_sorted_by_deadline, HomeworkItem, Urgency};
+use homework_core::{
+    fetch_all_homework, homework_stats_debug_report, pending_sorted_by_deadline, HomeworkItem,
+    Urgency,
+};
+use std::env;
 use std::io::{self, Write};
 
 fn main() {
     let items = fetch_all_homework(None).items;
+    let show_stats = env::args().any(|a| a == "--stats");
     print_reminder(&items);
+    if show_stats {
+        println!("\n{}\n", homework_stats_debug_report(&items));
+    }
 }
 
 fn print_reminder(homework_list: &[HomeworkItem]) {
