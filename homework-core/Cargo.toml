@@ -27,3 +27,4 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 url = "2"
 image = "0.25"
+reqwest_cookie_store = "0.8"

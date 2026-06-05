@@ -3,6 +3,7 @@ use crate::models::HomeworkItem;
 use chrono::{DateTime, Duration, Local, NaiveDateTime};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::blocking::Client;
+use reqwest_cookie_store::CookieStoreMutex;
 use serde_json::Value;
 use std::io;
 use std::sync::{Arc, Mutex};
@@ -16,6 +17,19 @@ fn json_int(v: Option<&Value>) -> Option<i64> {
     v.as_i64()
         .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
         .or_else(|| v.as_bool().map(i64::from))
+}
+
+/// Stringify an ID field that may arrive as a JSON number or string.
+///
+/// The login WebSocket sends `UserID` as a bare number (e.g. `54804515`), so
+/// `as_str()` alone yields `None`; the `/pc/web_login` body would then carry a
+/// null `UserID` and fail to issue a session.
+fn value_to_id_string(v: &Value) -> Option<String> {
+    match v {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
 }
 
 fn json_timestamp_positive(v: Option<&Value>) -> bool {
@@ -60,6 +74,7 @@ pub struct YuketangClient {
     sessionid: String,
     university_id: String,
     client: Client,
+    jar: Arc<CookieStoreMutex>,
     logged_in: bool,
 }
 
@@ -67,9 +82,10 @@ impl YuketangClient {
     const PLATFORM: &'static str = "长江雨课堂";
 
     pub fn new(csrftoken: &str, sessionid: &str, university_id: &str) -> Self {
+        let jar = Arc::new(CookieStoreMutex::default());
         let client = Client::builder()
             .user_agent(UA)
-            .cookie_store(true)
+            .cookie_provider(Arc::clone(&jar))
             .build()
             .expect("http client");
         let logged_in = !csrftoken.is_empty() && !sessionid.is_empty();
@@ -78,6 +94,7 @@ impl YuketangClient {
             sessionid: sessionid.to_string(),
             university_id: university_id.to_string(),
             client,
+            jar,
             logged_in,
         };
         if logged_in {
@@ -104,6 +121,23 @@ impl YuketangClient {
 
     fn apply_cookies(&self) {
         let _ = self.client.get("https://changjiang.yuketang.cn/web");
+    }
+
+    /// Fetch the deployment's `university_id` for the current custom-host portal.
+    ///
+    /// Regional/cloud deployments (e.g. `changjiang.yuketang.cn`) scope the
+    /// login to a tenant `university_id` rather than the main-site flow, so the
+    /// value is discovered before the `/pc/web_login` exchange.
+    fn fetch_university_id(&self) -> Option<String> {
+        let now = Local::now().timestamp_millis();
+        let url = format!(
+            "https://changjiang.yuketang.cn/edu_admin/get_custom_university_info/?current=1&_={now}"
+        );
+        let resp = self.client.get(url).send().ok()?;
+        let data: Value = resp.json().ok()?;
+        data.pointer("/data/university_id")
+            .map(|v| v.to_string().trim_matches('"').to_string())
+            .filter(|s| !s.is_empty() && s != "null")
     }
 
     fn api_headers(&self, classroom_id: &str) -> Vec<(&'static str, String)> {
@@ -187,10 +221,7 @@ impl YuketangClient {
                 if data.get("subscribe_status").and_then(|v| v.as_bool()) == Some(true) {
                     let mut guard = result_ws.lock().unwrap();
                     guard.success = true;
-                    guard.user_id = data
-                        .get("UserID")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string);
+                    guard.user_id = data.get("UserID").and_then(value_to_id_string);
                     guard.auth = data.get("Auth").and_then(|v| v.as_str()).map(str::to_string);
                     let name = data.get("Name").and_then(|v| v.as_str()).unwrap_or("");
                     let school = data.get("School").and_then(|v| v.as_str()).unwrap_or("");
@@ -212,23 +243,91 @@ impl YuketangClient {
             return Ok(false);
         }
 
+        let uv_id = self
+            .fetch_university_id()
+            .filter(|s| s.parse::<i64>().is_ok_and(|n| n > 0))
+            .unwrap_or_else(|| self.university_id.clone());
+        self.university_id = uv_id.clone();
+
+        // The WeChat scan login session is issued by `/pc/web_login`, which
+        // exchanges the WebSocket `UserID`/`Auth` for csrftoken/sessionid
+        // cookies. The cloud portal's `wx-qr-login` component posts exactly
+        // this body (`host_name` + `no_loading` included). By contrast,
+        // `verify-origin-system-bind` only reports `bind_status` for the
+        // account-binding/registration flow and never sets credentials, so it
+        // cannot complete a scan login.
         let body = serde_json::json!({
             "UserID": login_data.user_id,
             "Auth": login_data.auth,
+            "host_name": "changjiang.yuketang.cn",
+            "no_loading": true,
         });
         let resp = self
             .client
             .post("https://changjiang.yuketang.cn/pc/web_login")
             .header("Content-Type", "application/json")
+            .header("Origin", "https://changjiang.yuketang.cn")
+            .header("Referer", "https://changjiang.yuketang.cn/")
             .body(body.to_string())
             .send()
             .map_err(io::Error::other)?;
-        if !resp.status().is_success() {
+        let status = resp.status();
+        self.load_cookies_from_response(&resp);
+        if !status.is_success() {
             crate::hw_log!("[雨课堂] 登录凭证获取失败");
             return Ok(false);
         }
 
-        for cookie in resp.cookies() {
+        if self.csrftoken.is_empty() || self.sessionid.is_empty() {
+            self.load_cookies_from_jar();
+        }
+        if self.csrftoken.is_empty() || self.sessionid.is_empty() {
+            crate::hw_log!("[雨课堂] 登录凭证为空，保存失败");
+            return Ok(false);
+        }
+        self.logged_in = true;
+        crate::hw_log!("[雨课堂] 登录凭证获取成功");
+        Ok(true)
+    }
+
+    /// Read csrftoken/sessionid out of the `/pc/web_login` response's
+    /// `Set-Cookie` headers.
+    ///
+    /// The cloud deployment issues credentials with domain/path attributes that
+    /// reqwest's cookie jar scopes away from the request URL, so the jar can end
+    /// up empty. Parsing the raw headers captures every cookie regardless of
+    /// attributes.
+    fn load_cookies_from_response(&mut self, resp: &reqwest::blocking::Response) {
+        for value in resp.headers().get_all(reqwest::header::SET_COOKIE) {
+            let Ok(text) = value.to_str() else {
+                continue;
+            };
+            let Some(pair) = text.split(';').next() else {
+                continue;
+            };
+            let Some((name, val)) = pair.split_once('=') else {
+                continue;
+            };
+            match name.trim() {
+                "csrftoken" => self.csrftoken = val.trim().to_string(),
+                "sessionid" => self.sessionid = val.trim().to_string(),
+                "university_id" => self.university_id = val.trim().to_string(),
+                _ => {}
+            }
+        }
+    }
+
+    /// Read csrftoken/sessionid/university_id out of the shared cookie jar.
+    ///
+    /// `reqwest::Response::cookies()` only exposes the final hop's `Set-Cookie`
+    /// headers, so credentials issued during a 302 redirect are lost. Iterating
+    /// the store directly captures every cookie set across the redirect chain,
+    /// regardless of each cookie's path/domain attributes.
+    fn load_cookies_from_jar(&mut self) {
+        let Ok(store) = self.jar.lock() else {
+            return;
+        };
+        for cookie in store.iter_any() {
             match cookie.name() {
                 "csrftoken" => self.csrftoken = cookie.value().to_string(),
                 "sessionid" => self.sessionid = cookie.value().to_string(),
@@ -236,9 +335,6 @@ impl YuketangClient {
                 _ => {}
             }
         }
-        self.logged_in = true;
-        crate::hw_log!("[雨课堂] 登录凭证获取成功");
-        Ok(true)
     }
 
     fn parse_timestamp(ts: Option<&Value>) -> Option<NaiveDateTime> {
