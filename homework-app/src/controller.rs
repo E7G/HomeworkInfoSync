@@ -15,7 +15,7 @@ use std::thread;
 
 enum WorkerMsg {
     Progress(usize, usize, String),
-    FetchDone(Vec<HomeworkItem>, String),
+    FetchDone(Vec<HomeworkItem>, String, bool),
     QrPng(Vec<u8>),
     YktStatus(String, bool),
 }
@@ -80,8 +80,17 @@ impl AppController {
                         ui_on_progress(window, step as i32, total as i32, ptr);
                     }
                 }
-                WorkerMsg::FetchDone(items, log) => {
-                    self.apply_fetch_done(items, log);
+                WorkerMsg::FetchDone(items, log, ykt_expired) => {
+                    if ykt_expired {
+                        self.pending_strings.push_back(
+                            CString::new("凭证已过期，请重新扫码登录").unwrap_or_default(),
+                        );
+                        let ptr = self.pending_strings.back().unwrap().as_ptr();
+                        unsafe {
+                            ui_on_ykt_status(window, ptr);
+                        }
+                    }
+                    self.apply_fetch_done(items, log, ykt_expired);
                 }
                 WorkerMsg::QrPng(png) => unsafe {
                     ui_on_qr_png(window, png.as_ptr(), png.len() as i32);
@@ -125,8 +134,12 @@ impl AppController {
             let progress = Some(Box::new(move |step, total, msg: &str| {
                 let _ = progress_tx.send(WorkerMsg::Progress(step, total, msg.to_string()));
             }) as Box<dyn Fn(usize, usize, &str) + Send>);
-            let FetchResult { items, log } = fetch_all_homework(progress);
-            let _ = tx.send(WorkerMsg::FetchDone(items, log));
+            let FetchResult {
+                items,
+                log,
+                yuketang_session_expired,
+            } = fetch_all_homework(progress);
+            let _ = tx.send(WorkerMsg::FetchDone(items, log, yuketang_session_expired));
         });
     }
 
@@ -183,7 +196,7 @@ impl AppController {
     fn load_cache_ui(&mut self) {
         let (items, updated_at) = load_homework_cache();
         if !items.is_empty() {
-            self.apply_fetch_done(items, String::new());
+            self.apply_fetch_done(items, String::new(), false);
             if let Some(ts) = updated_at {
                 let msg = format!("已加载缓存（{}）", ts.format("%m-%d %H:%M"));
                 self.pending_strings
@@ -196,9 +209,16 @@ impl AppController {
         }
     }
 
-    fn apply_fetch_done(&mut self, items: Vec<HomeworkItem>, log_text: String) {
+    fn apply_fetch_done(&mut self, items: Vec<HomeworkItem>, log_text: String, ykt_expired: bool) {
         let (c_items, stats) = pack_items(&mut self.pending_strings, &items);
-        let status_msg = format!("获取完成 - 共 {} 项作业", items.len());
+        let status_msg = if ykt_expired {
+            format!(
+                "获取完成 - 共 {} 项作业（长江雨课堂凭证已过期，请重新扫码）",
+                items.len()
+            )
+        } else {
+            format!("获取完成 - 共 {} 项作业", items.len())
+        };
         self.pending_strings
             .push_back(CString::new(status_msg).unwrap_or_default());
         let status_ptr = self.pending_strings.back().unwrap().as_ptr();

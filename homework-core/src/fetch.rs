@@ -11,6 +11,7 @@ pub type ProgressCallback = Box<dyn Fn(usize, usize, &str) + Send>;
 pub struct FetchResult {
     pub items: Vec<HomeworkItem>,
     pub log: String,
+    pub yuketang_session_expired: bool,
 }
 
 pub fn fetch_all_homework(progress: Option<ProgressCallback>) -> FetchResult {
@@ -18,20 +19,28 @@ pub fn fetch_all_homework(progress: Option<ProgressCallback>) -> FetchResult {
     let result = fetch_all_homework_inner(progress);
     let mut log = end_capture();
     match result {
-        Ok(items) => FetchResult { items, log },
+        Ok((items, yuketang_session_expired)) => FetchResult {
+            items,
+            log,
+            yuketang_session_expired,
+        },
         Err(e) => {
             log.push_str(&format!("\n错误: {e}\n"));
             FetchResult {
                 items: Vec::new(),
                 log,
+                yuketang_session_expired: false,
             }
         }
     }
 }
 
-fn fetch_all_homework_inner(progress: Option<ProgressCallback>) -> io::Result<Vec<HomeworkItem>> {
+fn fetch_all_homework_inner(
+    progress: Option<ProgressCallback>,
+) -> io::Result<(Vec<HomeworkItem>, bool)> {
     let config = load_config();
     let mut all = Vec::new();
+    let mut yuketang_session_expired = false;
     let steps = [
         ("chaoxing", "超星"),
         ("ketangpai", "课堂派"),
@@ -74,7 +83,14 @@ fn fetch_all_homework_inner(progress: Option<ProgressCallback>) -> io::Result<Ve
                     &c.university_id,
                 );
                 if client.is_logged_in() {
-                    all.extend(client.get_homework()?);
+                    match client.get_homework() {
+                        Ok(hw) => all.extend(hw),
+                        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+                            hw_log!("[{label}] {e}");
+                            yuketang_session_expired = true;
+                        }
+                        Err(e) => return Err(e),
+                    }
                 } else if c.enabled {
                     hw_log!("[{label}] 未登录，请在配置页扫码登录");
                 } else {
@@ -95,7 +111,7 @@ fn fetch_all_homework_inner(progress: Option<ProgressCallback>) -> io::Result<Ve
 
     let _ = save_config(&config);
     let _ = io::stdout().flush();
-    Ok(all)
+    Ok((all, yuketang_session_expired))
 }
 
 pub fn save_yuketang_session(config: &mut AppConfig, csrftoken: &str, sessionid: &str) -> io::Result<()> {

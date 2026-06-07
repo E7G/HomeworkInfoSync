@@ -218,7 +218,7 @@ public:
         ykt_status_->setText(text);
         if (text.contains("成功") || text.contains("已保存")) {
             ykt_status_->setStyleSheet("color: #66bb6a; font-size: 12px;");
-        } else if (text.contains("失败") || text.contains("超时")) {
+        } else if (text.contains("失败") || text.contains("超时") || text.contains("过期")) {
             ykt_status_->setStyleSheet("color: #ef5350; font-size: 12px;");
         } else if (text.contains("等待")) {
             ykt_status_->setStyleSheet("color: #ffa726; font-size: 12px;");

@@ -6,11 +6,16 @@ use std::env;
 use std::io::{self, Write};
 
 fn main() {
-    let items = fetch_all_homework(None).items;
+    let result = fetch_all_homework(None);
     let show_stats = env::args().any(|a| a == "--stats");
-    print_reminder(&items);
+    print_reminder(&result.items);
+    if result.yuketang_session_expired {
+        println!("{}", "=".repeat(70));
+        println!("  ⚠ 长江雨课堂登录凭证已过期，请重新扫码登录");
+        println!("{}\n", "=".repeat(70));
+    }
     if show_stats {
-        println!("\n{}\n", homework_stats_debug_report(&items));
+        println!("\n{}\n", homework_stats_debug_report(&result.items));
     }
 }
 

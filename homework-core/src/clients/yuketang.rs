@@ -80,6 +80,7 @@ pub struct YuketangClient {
 
 impl YuketangClient {
     const PLATFORM: &'static str = "长江雨课堂";
+    pub const SESSION_EXPIRED_MSG: &'static str = "凭证已过期，请重新扫码登录";
 
     pub fn new(csrftoken: &str, sessionid: &str, university_id: &str) -> Self {
         let jar = Arc::new(CookieStoreMutex::default());
@@ -347,6 +348,19 @@ impl YuketangClient {
         DateTime::from_timestamp(val, 0).map(|dt| dt.naive_utc())
     }
 
+    fn is_session_expired(status: reqwest::StatusCode, data: &Value) -> bool {
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return true;
+        }
+        if json_int(data.get("errcode")).is_some_and(|c| c != 0) {
+            return true;
+        }
+        if let Some(msg) = data.get("errmsg").and_then(|v| v.as_str()) {
+            return !msg.eq_ignore_ascii_case("success");
+        }
+        false
+    }
+
     fn get_courses(&self) -> io::Result<Vec<YktCourse>> {
         let url = "https://changjiang.yuketang.cn/v2/api/web/courses/list?identity=2";
         let mut req = self.client.get(url);
@@ -354,7 +368,14 @@ impl YuketangClient {
             req = req.header(k, v);
         }
         let resp = req.send().map_err(io::Error::other)?;
+        let status = resp.status();
         let data: Value = resp.json().map_err(io::Error::other)?;
+        if Self::is_session_expired(status, &data) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                Self::SESSION_EXPIRED_MSG,
+            ));
+        }
         let now = Local::now().naive_local();
         let mut courses = Vec::new();
         for item in data
