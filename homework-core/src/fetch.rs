@@ -114,9 +114,17 @@ fn fetch_all_homework_inner(
     Ok((all, yuketang_session_expired))
 }
 
-pub fn save_yuketang_session(config: &mut AppConfig, csrftoken: &str, sessionid: &str) -> io::Result<()> {
+pub fn save_yuketang_session(
+    config: &mut AppConfig,
+    csrftoken: &str,
+    sessionid: &str,
+    university_id: &str,
+) -> io::Result<()> {
     config.yuketang.csrftoken = csrftoken.to_string();
     config.yuketang.sessionid = sessionid.to_string();
+    if !university_id.is_empty() {
+        config.yuketang.university_id = university_id.to_string();
+    }
     config.yuketang.enabled = true;
     save_config(config)
 }

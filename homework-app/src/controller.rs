@@ -169,10 +169,12 @@ impl AppController {
         if self.inbox.is_some() {
             return;
         }
+        let config = load_config();
+        let university_id = config.yuketang.university_id;
         let (tx, rx) = mpsc::channel();
         self.inbox = Some(rx);
         thread::spawn(move || {
-            let mut client = YuketangClient::new("", "", "3078");
+            let mut client = YuketangClient::new("", "", &university_id);
             let qr_tx = tx.clone();
             let ok = client.login_qrcode(move |url| {
                 if let Ok(png) = render_qr_png(url) {
@@ -185,6 +187,7 @@ impl AppController {
                     &mut cfg,
                     client.csrftoken(),
                     client.sessionid(),
+                    client.university_id(),
                 );
                 let _ = tx.send(WorkerMsg::YktStatus("登录成功！凭证已保存".to_string(), true));
             } else {

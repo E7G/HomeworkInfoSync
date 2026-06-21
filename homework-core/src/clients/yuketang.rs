@@ -211,8 +211,21 @@ impl YuketangClient {
                 let msg = tokio::time::timeout(remaining, read.next())
                     .await
                     .map_err(io::Error::other)?;
-                let Some(Ok(Message::Text(text))) = msg else {
-                    break;
+                let text = match msg {
+                    // The server periodically sends Ping/Pong/Binary keep-alive
+                    // frames; ignore them and keep waiting for the scan rather
+                    // than treating them as a failure. Reply to Ping so the
+                    // connection stays open.
+                    Some(Ok(Message::Text(text))) => text,
+                    Some(Ok(Message::Ping(payload))) => {
+                        let _ = write.send(Message::Pong(payload)).await;
+                        continue;
+                    }
+                    Some(Ok(Message::Pong(_))) | Some(Ok(Message::Binary(_)))
+                    | Some(Ok(Message::Frame(_))) => continue,
+                    // Close frame, stream end, or a transport error: stop.
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Err(e)) => return Err(io::Error::other(e)),
                 };
                 let data: Value = serde_json::from_str(&text).map_err(io::Error::other)?;
                 if let Some(url) = data.get("qrcode").and_then(|v| v.as_str()) {
