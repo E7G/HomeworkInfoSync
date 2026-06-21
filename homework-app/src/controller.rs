@@ -3,7 +3,7 @@ use crate::ffi::{
     ui_set_refresh_enabled, HwItemC, HwStatsC,
 };
 use homework_core::{
-    fetch_all_homework, homework_stats_debug_report, load_config, load_homework_cache,
+    config_path, fetch_all_homework, homework_stats_debug_report, load_config, load_homework_cache,
     pending_sorted_by_deadline, render_qr_png, save_config, save_yuketang_session, AppConfig,
     FetchResult, HomeworkItem, Urgency, YuketangClient,
 };
@@ -183,13 +183,28 @@ impl AppController {
             });
             if ok.unwrap_or(false) {
                 let mut cfg = load_config();
-                let _ = save_yuketang_session(
+                match save_yuketang_session(
                     &mut cfg,
                     client.csrftoken(),
                     client.sessionid(),
                     client.university_id(),
-                );
-                let _ = tx.send(WorkerMsg::YktStatus("登录成功！凭证已保存".to_string(), true));
+                ) {
+                    Ok(()) => {
+                        let _ = tx
+                            .send(WorkerMsg::YktStatus("登录成功！凭证已保存".to_string(), true));
+                    }
+                    Err(e) => {
+                        // Scan succeeded but the credentials could not be
+                        // persisted (e.g. config.json is read-only). Without
+                        // this the next launch silently reloads the stale
+                        // credentials and reports the session as expired.
+                        let msg = format!(
+                            "登录成功，但凭证保存失败：{e}（配置文件 {}，请检查是否只读或无写入权限）",
+                            config_path().display()
+                        );
+                        let _ = tx.send(WorkerMsg::YktStatus(msg, false));
+                    }
+                }
             } else {
                 let _ = tx.send(WorkerMsg::YktStatus("登录失败或超时".to_string(), false));
             }

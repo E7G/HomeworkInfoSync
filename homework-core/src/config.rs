@@ -138,7 +138,27 @@ pub fn load_config() -> AppConfig {
 
 pub fn save_config(cfg: &AppConfig) -> std::io::Result<()> {
     let text = serde_json::to_string_pretty(cfg).map_err(std::io::Error::other)?;
-    fs::write(config_path(), text)
+    let path = config_path();
+    clear_readonly(&path);
+    fs::write(path, text)
+}
+
+/// Clear a read-only attribute before writing.
+///
+/// A `config.json` shipped in a release archive can land on disk read-only
+/// (Windows preserves the zip entry's attribute). `fs::write` then fails with
+/// "access denied" and a freshly scanned QR session is silently lost, so the
+/// next launch reloads the stale credentials and reports them as expired.
+/// Best-effort: ignore errors and let the subsequent write surface any real
+/// permission problem.
+fn clear_readonly(path: &Path) {
+    if let Ok(meta) = fs::metadata(path) {
+        let mut perms = meta.permissions();
+        if perms.readonly() {
+            perms.set_readonly(false);
+            let _ = fs::set_permissions(path, perms);
+        }
+    }
 }
 
 impl AppConfig {
