@@ -86,6 +86,8 @@ impl YuketangClient {
         let jar = Arc::new(CookieStoreMutex::default());
         let client = Client::builder()
             .user_agent(UA)
+            .https_only(true)
+            .timeout(StdDuration::from_secs(15))
             .cookie_provider(Arc::clone(&jar))
             .build()
             .expect("http client");
@@ -170,6 +172,17 @@ impl YuketangClient {
     where
         F: Fn(&str) + Send + Sync + 'static,
     {
+        self.login_qrcode_with_cancel(on_qrcode, || false)
+    }
+
+    pub fn login_qrcode_with_cancel<F, C>(&mut self, on_qrcode: F, cancelled: C) -> io::Result<bool>
+    where
+        F: Fn(&str) + Send + Sync + 'static,
+        C: Fn() -> bool,
+    {
+        if cancelled() {
+            return Ok(false);
+        }
         let _ = self
             .client
             .get("https://changjiang.yuketang.cn/web")
@@ -179,11 +192,16 @@ impl YuketangClient {
         let result = Arc::new(Mutex::new(QrLoginResult::default()));
         let result_ws = Arc::clone(&result);
         let on_qrcode = Arc::new(on_qrcode);
+        let is_cancelled = &cancelled;
 
         let rt = Runtime::new().map_err(io::Error::other)?;
         let ok = rt.block_on(async move {
-            let (ws, _) = connect_async("wss://changjiang.yuketang.cn/wsapp/")
+            let (ws, _) = tokio::time::timeout(
+                StdDuration::from_secs(15),
+                connect_async("wss://changjiang.yuketang.cn/wsapp/"),
+            )
                 .await
+                .map_err(io::Error::other)?
                 .map_err(io::Error::other)?;
             let (mut write, mut read) = ws.split();
 
@@ -205,12 +223,13 @@ impl YuketangClient {
             let deadline = tokio::time::Instant::now() + StdDuration::from_secs(120);
             loop {
                 let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                if remaining.is_zero() {
+                if remaining.is_zero() || is_cancelled() {
                     break;
                 }
-                let msg = tokio::time::timeout(remaining, read.next())
-                    .await
-                    .map_err(io::Error::other)?;
+                let Ok(msg) = tokio::time::timeout(
+                    remaining.min(StdDuration::from_millis(750)),
+                    read.next(),
+                ).await else { continue };
                 let text = match msg {
                     // The server periodically sends Ping/Pong/Binary keep-alive
                     // frames; ignore them and keep waiting for the scan rather
@@ -252,7 +271,7 @@ impl YuketangClient {
         }
 
         let login_data = result.lock().unwrap().clone();
-        if !login_data.success {
+        if !login_data.success || cancelled() {
             crate::hw_log!("[雨课堂] 扫码登录超时或失败");
             return Ok(false);
         }
@@ -358,7 +377,7 @@ impl YuketangClient {
         } else {
             raw
         };
-        DateTime::from_timestamp(val, 0).map(|dt| dt.naive_utc())
+        DateTime::from_timestamp(val, 0).map(|dt| dt.with_timezone(&Local).naive_local())
     }
 
     fn is_session_expired(status: reqwest::StatusCode, data: &Value) -> bool {
@@ -382,6 +401,10 @@ impl YuketangClient {
         }
         let resp = req.send().map_err(io::Error::other)?;
         let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, Self::SESSION_EXPIRED_MSG));
+        }
+        let resp = resp.error_for_status().map_err(io::Error::other)?;
         let data: Value = resp.json().map_err(io::Error::other)?;
         if Self::is_session_expired(status, &data) {
             return Err(io::Error::new(
@@ -391,12 +414,11 @@ impl YuketangClient {
         }
         let now = Local::now().naive_local();
         let mut courses = Vec::new();
-        for item in data
+        let list = data
             .pointer("/data/list")
             .and_then(|v| v.as_array())
-            .into_iter()
-            .flatten()
-        {
+            .ok_or_else(|| io::Error::other("雨课堂课程列表格式异常"))?;
+        for item in list {
             let course_info = item.get("course");
             let classroom_id = item
                 .get("classroom_id")
@@ -437,6 +459,15 @@ impl YuketangClient {
     }
 
     pub fn get_homework(&self) -> io::Result<Vec<HomeworkItem>> {
+        self.fetch_homework(false)
+    }
+
+    /// Treat a partial result as a failure so a sync client can retain its cache.
+    pub fn get_homework_for_sync(&self) -> io::Result<Vec<HomeworkItem>> {
+        self.fetch_homework(true)
+    }
+
+    fn fetch_homework(&self, require_complete: bool) -> io::Result<Vec<HomeworkItem>> {
         let mut homework = Vec::new();
         for course in self.get_courses()? {
             let url = format!(
@@ -449,6 +480,7 @@ impl YuketangClient {
             }
             let resp = match req.send() {
                 Ok(r) => r,
+                Err(e) if require_complete => return Err(io::Error::other(e)),
                 Err(e) => {
                     crate::hw_log!(
                         "[长江雨课堂] 获取课程 '{}' 作业时出错: {e}",
@@ -457,8 +489,19 @@ impl YuketangClient {
                     continue;
                 }
             };
+            let status = resp.status();
+            if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+                if require_complete {
+                    return Err(io::Error::new(io::ErrorKind::PermissionDenied, Self::SESSION_EXPIRED_MSG));
+                }
+                continue;
+            }
+            if require_complete && !status.is_success() {
+                return Err(io::Error::other("雨课堂获取课程作业失败"));
+            }
             let data: Value = match resp.json() {
                 Ok(v) => v,
+                Err(e) if require_complete => return Err(io::Error::other(e)),
                 Err(e) => {
                     crate::hw_log!(
                         "[长江雨课堂] 获取课程 '{}' 作业时出错: {e}",
@@ -467,6 +510,9 @@ impl YuketangClient {
                     continue;
                 }
             };
+            if require_complete && Self::is_session_expired(status, &data) {
+                return Err(io::Error::new(io::ErrorKind::PermissionDenied, Self::SESSION_EXPIRED_MSG));
+            }
             for act in data
                 .pointer("/data/activities")
                 .and_then(|v| v.as_array())

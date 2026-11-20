@@ -7,5 +7,9 @@ build/
 .env
 .env.*
 *.log
+*.apk
+*.p12
+*.jks
+*.keystore
 .DS_Store
 Thumbs.db

@@ -1,5 +1,7 @@
 # HomeworkInfoSync
 
+原生安卓移植见 [homework-android](homework-android/README.md)。安装包位于 [GitHub Releases](https://github.com/E7G/HomeworkInfoSync/releases/latest)。
+
 多平台作业信息同步工具，自动获取超星/学习通、课堂派、长江雨课堂的作业信息，统一展示截止时间和提交状态。
 
 ## 功能
@@ -55,12 +57,16 @@ cargo run --release -p homework-core --bin homework-remind -- --stats
 
 ## 发布
 
-推送 `v*` 标签触发 GitHub Actions 构建 Windows Release 包：
+在 [Actions → Build and Release](https://github.com/E7G/HomeworkInfoSync/actions/workflows/release.yml) 点击 **Run workflow**，选默认分支并输入未发布的版本标签（如 `v0.2.0`）。流程会编译 Windows ZIP 和签名 Android APK，两者都通过后上传到同一个 GitHub Release，无需手动上传。
+
+也可以在默认分支的提交上推送版本标签触发：
 
 ```bash
 git tag v0.2.0
 git push origin v0.2.0
 ```
+
+其他仓库要启用发布，请在 Actions 设置中配置 `HOMEWORK_ANDROID_KEYSTORE_BASE64` 和 `HOMEWORK_ANDROID_KEYSTORE_PASSWORD` 两个 Secrets，以及 `HOMEWORK_ANDROID_CERT_SHA256` Variable。签名文件须为带 `homework-sync` 别名的 PKCS#12 文件，签名私钥不进仓库。后续安卓发布打包前请更新 AndroidManifest 中的版本号；为支持覆盖安装，请沿用同一签名。
 
 ## 致谢
 

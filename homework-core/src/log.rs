@@ -14,6 +14,7 @@ pub fn end_capture() -> String {
 
 pub fn log_line(msg: impl AsRef<str>) {
     let msg = msg.as_ref();
+    #[cfg(not(target_os = "android"))]
     eprintln!("{msg}");
     CAPTURE.with(|c| {
         if let Some(buf) = c.borrow_mut().as_mut() {

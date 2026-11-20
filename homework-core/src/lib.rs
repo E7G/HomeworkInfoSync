@@ -13,7 +13,7 @@ macro_rules! hw_log {
 }
 
 pub use cache::{load_homework_cache, save_homework_cache};
-pub use clients::YuketangClient;
+pub use clients::{ChaoxingClient, KetangpaiClient, YuketangClient};
 pub use clients::yuketang::render_qr_png;
 pub use config::{
     app_dir, config_path, load_config, resolve_config_path, save_config, AppConfig, PlatformConfig,

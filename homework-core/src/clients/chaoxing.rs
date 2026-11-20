@@ -52,6 +52,8 @@ impl ChaoxingClient {
     pub fn new(user: &str, password: &str) -> Self {
         let client = Client::builder()
             .user_agent(UA)
+            .https_only(true)
+            .timeout(std::time::Duration::from_secs(15))
             .cookie_store(true)
             .build()
             .expect("http client");
@@ -100,8 +102,7 @@ impl ChaoxingClient {
             .map_err(io::Error::other)?;
         let data: serde_json::Value = resp.json().map_err(io::Error::other)?;
         let Some(channels) = data.get("channelList").and_then(|v| v.as_array()) else {
-            crate::hw_log!("[超星] 课程列表为空");
-            return Ok(vec![]);
+            return Err(io::Error::other("超星课程列表格式异常"));
         };
         let mut courses = Vec::new();
         for channel in channels {
@@ -592,6 +593,7 @@ impl ChaoxingClient {
             .client
             .get("https://mooc1-api.chaoxing.com/work/stu-work")
             .send()
+            .and_then(reqwest::blocking::Response::error_for_status)
             .map_err(io::Error::other)?
             .text()
             .map_err(io::Error::other)?;

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["homework-core", "homework-app"]
+members = ["homework-core", "homework-app", "homework-android/native"]
 
 [profile.release]
 lto = true

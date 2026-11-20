@@ -2,63 +2,225 @@ name: Build and Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '未发布的版本标签（例如 v0.2.0）'
+        required: true
+        type: string
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
-  release:
-    runs-on: windows-latest
+  prepare:
+    name: Verify release target
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      commit: ${{ steps.check.outputs.commit }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check version and commit
+        id: check
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            [[ "$GITHUB_REF" == "refs/heads/$DEFAULT_BRANCH" ]] || {
+              echo "::error::Run releases from the default branch."
+              exit 1
+            }
+            tag="$INPUT_TAG"
+          else
+            tag="$GITHUB_REF_NAME"
+          fi
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::Use a version such as v0.2.0."
+            exit 1
+          }
+          commit="$(git rev-parse HEAD)"
+          git merge-base --is-ancestor "$commit" "origin/$DEFAULT_BRANCH" || {
+            echo "::error::The release commit must be on the default branch."
+            exit 1
+          }
+          tagged="$(git rev-parse --verify "refs/tags/$tag^{commit}" 2>/dev/null || true)"
+          if [[ -n "$tagged" && "$tagged" != "$commit" ]]; then
+            echo "::error::This tag already points to a different commit."
+            exit 1
+          fi
+          if [[ "$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null || true)" == false ]]; then
+            echo "::error::This release is already published. Choose a new version."
+            exit 1
+          fi
+          printf 'tag=%s\ncommit=%s\n' "$tag" "$commit" >> "$GITHUB_OUTPUT"
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Qt
-        uses: jurplel/install-qt-action@v4
+  windows:
+    name: Build Windows ZIP
+    needs: prepare
+    runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          persist-credentials: false
+      - uses: jurplel/install-qt-action@b344308e4483fc892e0d27b3cd1b173ebdd95f06 # v4
         with:
           version: '6.8.3'
           host: windows
           target: desktop
           arch: win64_msvc2022_64
-
-      - name: Build release
-        run: cargo build --release -p homework-app
-        env:
-          QMAKE: ${{ env.QT_ROOT_DIR }}/bin/qmake.exe
-
-      - name: Deploy Qt runtime
+      - name: Build
+        shell: pwsh
         run: |
-          $qtBin = "$env:QT_ROOT_DIR\bin"
-          $out = "target\release"
-          Copy-Item "$qtBin\Qt6Core.dll" $out
-          Copy-Item "$qtBin\Qt6Gui.dll" $out
-          Copy-Item "$qtBin\Qt6Widgets.dll" $out
-          New-Item -ItemType Directory -Force -Path "$out\platforms" | Out-Null
-          Copy-Item "$env:QT_ROOT_DIR\plugins\platforms\qwindows.dll" "$out\platforms\"
-          Copy-Item "config.example.json" "$out\config.example.json"
-          Copy-Item "icon.ico" "$out\icon.ico"
-
-      - name: Package release zip
+          $env:QMAKE = Join-Path $env:QT_ROOT_DIR 'bin/qmake.exe'
+          cargo +stable build --locked --release -p homework-app
+      - name: Package Windows executable and Qt runtime
+        shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          $zip = "dist\HomeworkSync-win64.zip"
-          if (Test-Path $zip) { Remove-Item $zip -Force }
-          Compress-Archive -Path @(
-            "target\release\HomeworkSync.exe",
-            "target\release\Qt6Core.dll",
-            "target\release\Qt6Gui.dll",
-            "target\release\Qt6Widgets.dll",
-            "target\release\platforms",
-            "target\release\config.example.json",
-            "target\release\icon.ico"
-          ) -DestinationPath $zip -CompressionLevel Optimal
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
+          $stage = (New-Item -ItemType Directory -Path dist/stage -Force).FullName
+          Copy-Item target/release/HomeworkSync.exe, config.example.json, icon.ico, LICENSE -Destination $stage
+          $qt = Join-Path $env:QT_ROOT_DIR 'bin/windeployqt.exe'
+          & $qt --release --no-translations --no-opengl-sw --dir $stage (Join-Path $stage 'HomeworkSync.exe')
+          if ($LASTEXITCODE -ne 0) { throw 'Qt runtime deployment failed.' }
+          foreach ($required in @('Qt6Core.dll', 'Qt6Gui.dll', 'Qt6Widgets.dll', 'platforms/qwindows.dll')) {
+            if (!(Test-Path (Join-Path $stage $required))) { throw "Missing Windows runtime file: $required" }
+          }
+          Compress-Archive -Path "$stage/*" -DestinationPath dist/HomeworkSync-win64.zip -CompressionLevel Optimal
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          files: dist/HomeworkSync-win64.zip
-          generate_release_notes: true
+          name: homework-windows
+          path: dist/HomeworkSync-win64.zip
+          if-no-files-found: error
+          overwrite: true
+
+  android:
+    name: Build signed Android APK
+    needs: prepare
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          persist-credentials: false
+      - name: Install toolchains
+        shell: pwsh
+        run: |
+          if ($env:JAVA_HOME_17_X64) {
+            $env:JAVA_HOME = $env:JAVA_HOME_17_X64
+            "JAVA_HOME=$env:JAVA_HOME" >> $env:GITHUB_ENV
+          }
+          $ndkVersion = '28.2.13676358'
+          $ndk = Join-Path $env:ANDROID_HOME "ndk/$ndkVersion"
+          $packages = @()
+          if (!(Test-Path "$env:ANDROID_HOME/platforms/android-35/android.jar")) { $packages += 'platforms;android-35' }
+          if (!(Test-Path "$env:ANDROID_HOME/build-tools/35.0.0/apksigner.bat")) { $packages += 'build-tools;35.0.0' }
+          if (!(Test-Path "$ndk/source.properties")) { $packages += "ndk;$ndkVersion" }
+          if ($packages.Count -gt 0) {
+            $sdkmanager = Get-ChildItem -Path "$env:ANDROID_HOME/cmdline-tools" -Recurse -Filter sdkmanager.bat |
+              Sort-Object @{Expression = { $_.FullName -notmatch '[\\/]latest[\\/]' }} | Select-Object -First 1
+            if (!$sdkmanager) { throw 'Missing Android SDK command-line tools.' }
+            & $sdkmanager.FullName "--sdk_root=$env:ANDROID_HOME" --install @packages
+            if ($LASTEXITCODE -ne 0) { throw 'Android SDK package installation failed.' }
+          }
+          "ANDROID_NDK_HOME=$ndk" >> $env:GITHUB_ENV
+          # Override the image defaults for tools that look at these legacy names.
+          "ANDROID_NDK_ROOT=$ndk" >> $env:GITHUB_ENV
+          "ANDROID_NDK=$ndk" >> $env:GITHUB_ENV
+          rustup toolchain install stable --profile minimal --target aarch64-linux-android,x86_64-linux-android
+          if ($LASTEXITCODE -ne 0) { throw 'Rust toolchain installation failed.' }
+          rustup override set stable
+          if ($LASTEXITCODE -ne 0) { throw 'Rust toolchain selection failed.' }
+          cargo install cargo-ndk --version 4.1.2 --locked
+          if ($LASTEXITCODE -ne 0) { throw 'cargo-ndk installation failed.' }
+      - name: Compile Rust Android libraries
+        shell: pwsh
+        run: |
+          cargo ndk -t arm64-v8a -t x86_64 --platform 26 -o homework-android/build/jni build --locked --release -p homework-android-jni
+      - name: Build, sign and verify APK
+        shell: pwsh
+        env:
+          HOMEWORK_ANDROID_KEYSTORE: ${{ secrets.HOMEWORK_ANDROID_KEYSTORE_BASE64 }}
+          HOMEWORK_KS_PASS: ${{ secrets.HOMEWORK_ANDROID_KEYSTORE_PASSWORD }}
+          EXPECTED_CERT: ${{ vars.HOMEWORK_ANDROID_CERT_SHA256 }}
+        run: |
+          if (!$env:HOMEWORK_ANDROID_KEYSTORE -or !$env:HOMEWORK_KS_PASS -or $env:EXPECTED_CERT -notmatch '^[a-fA-F0-9]{64}$') {
+            throw 'Android release signing secrets or certificate digest are missing.'
+          }
+          $key = Join-Path $env:RUNNER_TEMP 'homework-release.p12'
+          $apk = Join-Path $PWD 'dist/HomeworkInfoSync-Android.apk'
+          try {
+            [IO.File]::WriteAllBytes($key, [Convert]::FromBase64String($env:HOMEWORK_ANDROID_KEYSTORE))
+            Remove-Item Env:HOMEWORK_ANDROID_KEYSTORE
+            ./homework-android/build-apk.ps1 -PackageOnly -Abi arm64-v8a,x86_64 -KeyStore $key -OutputPath $apk
+            $signer = Join-Path $env:ANDROID_HOME 'build-tools/35.0.0/apksigner.bat'
+            $certs = & $signer verify --print-certs $apk
+            if ($LASTEXITCODE -ne 0) { throw 'APK signature verification failed.' }
+            $digest = [regex]::Match(($certs -join "`n"), 'certificate SHA-256 digest:\s*([a-fA-F0-9]{64})').Groups[1].Value
+            if ($digest -ne $env:EXPECTED_CERT) { throw 'APK signed by an unexpected certificate.' }
+          } finally {
+            if (Test-Path -LiteralPath $key) { Remove-Item -LiteralPath $key -Force }
+          }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: homework-android
+          path: dist/HomeworkInfoSync-Android.apk
+          if-no-files-found: error
+          overwrite: true
+
+  publish:
+    name: Publish GitHub Release
+    needs: [prepare, windows, android]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: homework-*
+          path: dist
+          merge-multiple: true
+      - name: Upload packages and publish
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.prepare.outputs.commit }}
+        run: |
+          windows=dist/HomeworkSync-win64.zip
+          android=dist/HomeworkInfoSync-Android.apk
+          test -s "$windows"
+          test -s "$android"
+
+          tagged="$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha 2>/dev/null || true)"
+          if [[ -n "$tagged" && "$tagged" != "$RELEASE_COMMIT" ]]; then
+            echo "::error::The tag no longer matches the verified commit."
+            exit 1
+          fi
+
+          if release="$(gh release view "$RELEASE_TAG" --json isDraft,targetCommitish --jq '[.isDraft,.targetCommitish] | @tsv' 2>/dev/null)"; then
+            if [[ "$release" != $'true\t'"$RELEASE_COMMIT" ]]; then
+              echo "::error::A conflicting release already exists."
+              exit 1
+            fi
+          else
+            gh release create "$RELEASE_TAG" --target "$RELEASE_COMMIT" --title "$RELEASE_TAG" \
+              --draft --generate-notes \
+              --notes $'- Android：下载 HomeworkInfoSync-Android.apk（Android 8.0+，arm64-v8a / x86_64）。\n- Windows：下载并解压 HomeworkSync-win64.zip。'
+          fi
+          gh release upload "$RELEASE_TAG" "$windows" "$android" --clobber
+          gh release edit "$RELEASE_TAG" --draft=false --latest

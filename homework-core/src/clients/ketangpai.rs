@@ -45,6 +45,8 @@ impl KetangpaiClient {
     pub fn new(email: &str, password: &str) -> Self {
         let client = Client::builder()
             .user_agent(UA)
+            .https_only(true)
+            .timeout(std::time::Duration::from_secs(15))
             .build()
             .expect("http client");
         Self {
@@ -83,7 +85,7 @@ impl KetangpaiClient {
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
             crate::hw_log!("[课堂派] 登录成功");
-            Ok(true)
+            Ok(self.token.is_some())
         } else {
             let msg = data
                 .get("message")
@@ -115,8 +117,7 @@ impl KetangpaiClient {
             .map_err(io::Error::other)?;
         let data: Value = resp.json().map_err(io::Error::other)?;
         if data.get("message").and_then(|v| v.as_str()) != Some("访问成功") {
-            crate::hw_log!("[课堂派] 获取课程列表失败");
-            return Ok(vec![]);
+            return Err(io::Error::other("课堂派获取课程列表失败"));
         }
         let all = data
             .get("data")
@@ -141,6 +142,15 @@ impl KetangpaiClient {
     }
 
     pub fn get_homework(&self) -> io::Result<Vec<HomeworkItem>> {
+        self.fetch_homework(false)
+    }
+
+    /// Treat a partial result as a failure so a sync client can retain its cache.
+    pub fn get_homework_for_sync(&self) -> io::Result<Vec<HomeworkItem>> {
+        self.fetch_homework(true)
+    }
+
+    fn fetch_homework(&self, require_complete: bool) -> io::Result<Vec<HomeworkItem>> {
         let token = self.token.as_deref().ok_or_else(|| {
             io::Error::new(io::ErrorKind::Other, "课堂派未登录")
         })?;
@@ -174,8 +184,10 @@ impl KetangpaiClient {
                 .header("token", token)
                 .json(&body)
                 .send()
+                .and_then(reqwest::blocking::Response::error_for_status)
             {
                 Ok(r) => r,
+                Err(e) if require_complete => return Err(io::Error::other(e)),
                 Err(e) => {
                     crate::hw_log!("[课堂派] 请求失败: {e}");
                     continue;
@@ -183,12 +195,16 @@ impl KetangpaiClient {
             };
             let data: Value = match resp.json() {
                 Ok(v) => v,
+                Err(e) if require_complete => return Err(io::Error::other(e)),
                 Err(e) => {
                     crate::hw_log!("[课堂派] 解析失败: {e}");
                     continue;
                 }
             };
             if data.get("message").and_then(|v| v.as_str()) != Some("访问成功") {
+                if require_complete {
+                    return Err(io::Error::other("课堂派获取课程作业失败"));
+                }
                 continue;
             }
             let list = data

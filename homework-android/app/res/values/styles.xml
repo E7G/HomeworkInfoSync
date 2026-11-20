@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="HomeworkTheme" parent="@style/HomeworkThemeLight" />
+    <style name="HomeworkThemeLight" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#315F45</item>
+        <item name="android:windowBackground">#F5F4ED</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:forceDarkAllowed">false</item>
+        <item name="android:alertDialogTheme">@style/HomeworkDialogLight</item>
+    </style>
+    <style name="HomeworkThemeDark" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#B8DBBD</item>
+        <item name="android:windowBackground">#111916</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:forceDarkAllowed">false</item>
+        <item name="android:alertDialogTheme">@style/HomeworkDialogDark</item>
+    </style>
+    <style name="HomeworkDialogLight" parent="android:style/Theme.Material.Light.Dialog.Alert">
+        <item name="android:colorAccent">#315F45</item>
+        <item name="android:forceDarkAllowed">false</item>
+    </style>
+    <style name="HomeworkDialogDark" parent="android:style/Theme.Material.Dialog.Alert">
+        <item name="android:colorAccent">#B8DBBD</item>
+        <item name="android:colorBackgroundFloating">#1B2721</item>
+        <item name="android:textColorPrimary">#ECF3ED</item>
+        <item name="android:textColorSecondary">#B4C2B8</item>
+        <item name="android:colorControlNormal">#B4C2B8</item>
+        <item name="android:forceDarkAllowed">false</item>
+    </style>
+</resources>
