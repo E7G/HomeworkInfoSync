@@ -9,6 +9,10 @@ on:
         description: '未发布的版本标签（例如 v0.2.0）'
         required: true
         type: string
+      retry_run:
+        description: '仅发布失败时使用：原 Actions 运行 ID，复用已验证的构建产物'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -22,9 +26,13 @@ jobs:
     name: Verify release target
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
     outputs:
       tag: ${{ steps.check.outputs.tag }}
       commit: ${{ steps.check.outputs.commit }}
+      build_run: ${{ steps.check.outputs.build_run }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -34,6 +42,7 @@ jobs:
         id: check
         env:
           INPUT_TAG: ${{ inputs.tag }}
+          RETRY_RUN: ${{ inputs.retry_run }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -64,11 +73,35 @@ jobs:
             echo "::error::This release is already published. Choose a new version."
             exit 1
           fi
-          printf 'tag=%s\ncommit=%s\n' "$tag" "$commit" >> "$GITHUB_OUTPUT"
+          if [[ -n "$RETRY_RUN" ]]; then
+            [[ "$RETRY_RUN" =~ ^[0-9]+$ ]]
+            run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RETRY_RUN")"
+            jq -e --arg branch "$DEFAULT_BRANCH" --arg repo "$GITHUB_REPOSITORY" '
+              .status == "completed" and .conclusion == "failure" and
+              .path == ".github/workflows/release.yml" and .event == "workflow_dispatch" and
+              .head_branch == $branch and .head_repository.full_name == $repo
+            ' <<< "$run" >/dev/null
+            build_commit="$(jq -r .head_sha <<< "$run")"
+            [[ "$build_commit" =~ ^[0-9a-f]{40}$ ]]
+            git merge-base --is-ancestor "$build_commit" "$commit"
+            if ! git diff --quiet "$build_commit" "$commit" -- . ':(exclude).github/workflows/release.yml'; then
+              echo "::error::Release source differs from the previous build; run a full build instead."
+              exit 1
+            fi
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RETRY_RUN/jobs?filter=latest" | jq -e '
+              .jobs as $jobs |
+              any($jobs[]; .name == "Verify release target" and .conclusion == "success") and
+              any($jobs[]; .name == "Build Windows ZIP" and .conclusion == "success") and
+              any($jobs[]; .name == "Build signed Android APK" and .conclusion == "success") and
+              any($jobs[]; .name == "Publish GitHub Release" and .conclusion == "failure")
+            ' >/dev/null
+          fi
+          printf 'tag=%s\ncommit=%s\nbuild_run=%s\n' "$tag" "$commit" "$RETRY_RUN" >> "$GITHUB_OUTPUT"
 
   windows:
     name: Build Windows ZIP
     needs: prepare
+    if: needs.prepare.outputs.build_run == ''
     runs-on: windows-2022
     timeout-minutes: 25
     steps:
@@ -109,6 +142,7 @@ jobs:
   android:
     name: Build signed Android APK
     needs: prepare
+    if: needs.prepare.outputs.build_run == ''
     runs-on: windows-2022
     timeout-minutes: 30
     steps:
@@ -184,13 +218,27 @@ jobs:
   publish:
     name: Publish GitHub Release
     needs: [prepare, windows, android]
+    if: >-
+      !cancelled() && needs.prepare.result == 'success' &&
+      ((needs.windows.result == 'success' && needs.android.result == 'success') ||
+       (needs.prepare.outputs.build_run != '' && needs.windows.result == 'skipped' && needs.android.result == 'skipped'))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: write
+      actions: read
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        if: needs.prepare.outputs.build_run == ''
         with:
+          pattern: homework-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        if: needs.prepare.outputs.build_run != ''
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ needs.prepare.outputs.build_run }}
           pattern: homework-*
           path: dist
           merge-multiple: true
@@ -206,10 +254,14 @@ jobs:
           test -s "$windows"
           test -s "$android"
 
-          tagged="$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha 2>/dev/null || true)"
-          if [[ -n "$tagged" && "$tagged" != "$RELEASE_COMMIT" ]]; then
-            echo "::error::The tag no longer matches the verified commit."
-            exit 1
+          existing="$(gh api "repos/$GH_REPO/git/matching-refs/tags/$RELEASE_TAG" |
+            jq -r --arg ref "refs/tags/$RELEASE_TAG" '.[] | select(.ref == $ref) | .ref')"
+          if [[ -n "$existing" ]]; then
+            tagged="$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha)"
+            if [[ "$tagged" != "$RELEASE_COMMIT" ]]; then
+              echo "::error::The tag no longer matches the verified commit."
+              exit 1
+            fi
           fi
 
           if release="$(gh release view "$RELEASE_TAG" --json isDraft,targetCommitish --jq '[.isDraft,.targetCommitish] | @tsv' 2>/dev/null)"; then
